@@ -1,2 +1,2 @@
-# 本地临时文件，不入库
-/new-game-project/tools/sandbox/
+# 本地工具数据与临时文件，不入库
+/.codebuddy/
