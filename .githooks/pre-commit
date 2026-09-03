@@ -1,0 +1,17 @@
+#!/bin/sh
+# 反模式 lint（pre-commit）：与 CI 同源，规则来源 docs/agents/godot-standards.md 机器执法节
+# 与 docs/research/godot-4-5-to-4-7-changes.md。编译能过但语义已变的 4.5+ API 用法在此拦截。
+# 新克隆装机：git config core.hooksPath .githooks
+# 扫描范围为整个 new-game-project（文件少，全扫成本低于增量判定的复杂度）。
+
+matches=$(grep -rniE '\.device[[:space:]]*[!=]=[[:space:]]*0\b|size_in_percent|width_in_percent|height_in_percent|get_as_text[[:space:]]*\([[:space:]]*[^)]|tap_back_pos|instance_set_interpolated|instance_reset_physics_interpolation|get_rpc_config|\.duplicate[[:space:]]*\([[:space:]]*true[[:space:]]*\)' new-game-project --include='*.gd')
+
+if [ -n "$matches" ]; then
+  echo "$matches"
+  echo ""
+  echo "pre-commit 拦截：命中 4.5+ 已改名/已移除/语义变更 API 反模式。"
+  echo "对照 docs/agents/godot-standards.md 硬规则修复后重试；若为 lint 模式误报，先修订本钩子与 CI 中的模式再提交。"
+  exit 1
+fi
+
+exit 0

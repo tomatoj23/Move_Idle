@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "new-game-project/**"
+      - ".github/workflows/ci.yml"
+  pull_request:
+    paths:
+      - "new-game-project/**"
+      - ".github/workflows/ci.yml"
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GODOT_VERSION: 4.7.2-stable
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Godot ${{ env.GODOT_VERSION }}
+        run: |
+          curl -L --fail -o godot.zip \
+            "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}/Godot_v${GODOT_VERSION}_linux.x86_64.zip"
+          unzip godot.zip
+          chmod +x "Godot_v${GODOT_VERSION}_linux.x86_64"
+
+      - name: Import project
+        run: "./Godot_v${GODOT_VERSION}_linux.x86_64 --headless --path new-game-project --import"
+
+      - name: Validate all scripts, scenes and resources
+        run: |
+          set -o pipefail
+          "./Godot_v${GODOT_VERSION}_linux.x86_64" --headless --path new-game-project \
+            --script res://tools/validation/check_project.gd 2>&1 | tee check_output.log
+          if grep -qE "SCRIPT ERROR|Parse Error" check_output.log; then
+            echo "::error::检测到脚本编译错误，见上方 SCRIPT ERROR 行"
+            exit 1
+          fi
+          if ! grep -q "CHECK OK" check_output.log; then
+            echo "::error::校验脚本未输出 CHECK OK（脚本自身加载失败或异常退出），按失败处理"
+            exit 1
+          fi
+
+      - name: Lint for 4.5+ removed/renamed API anti-patterns
+        run: |
+          # 反模式来源：docs/research/godot-4-5-to-4-7-changes.md（官方迁移指南镜像）
+          # 与 docs/agents/godot-standards.md 硬规则。编译能过但语义已变的条目靠这层抓。
+          matches=$(grep -rniE '\.device[[:space:]]*[!=]=[[:space:]]*0\b|size_in_percent|width_in_percent|height_in_percent|get_as_text[[:space:]]*\([[:space:]]*[^)]|tap_back_pos|instance_set_interpolated|instance_reset_physics_interpolation|get_rpc_config|\.duplicate[[:space:]]*\([[:space:]]*true[[:space:]]*\)' new-game-project --include='*.gd' || true)
+          if [ -n "$matches" ]; then
+            echo "$matches"
+            echo "::error::命中 4.5+ 已改名/已移除/语义变更 API 反模式，对照 docs/agents/godot-standards.md 硬规则修复"
+            exit 1
+          fi
+
+      - name: Upload check output
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: check-output
+          path: check_output.log
