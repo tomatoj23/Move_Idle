@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:move-idle:schema:set:v1",
+  "title": "套装（成员为专属基底，效果按穿着件数阶梯激活）",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "name", "members", "tiers"],
+  "properties": {
+    "id": { "$ref": "urn:move-idle:schema:common:v1#/$defs/id" },
+    "name": { "$ref": "urn:move-idle:schema:common:v1#/$defs/name" },
+    "flavor": { "$ref": "urn:move-idle:schema:common:v1#/$defs/flavor" },
+    "members": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 3,
+      "items": { "$ref": "urn:move-idle:schema:common:v1#/$defs/ref" },
+      "description": "成员基底 id 列表；成员资格单一真相在此声明，基底侧不回写。校验器：引用存在、各成员槽位互不重复（一槽一成员）。"
+    },
+    "tiers": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["pieces", "effects"],
+        "properties": {
+          "pieces": {
+            "type": "integer",
+            "minimum": 2,
+            "description": "激活所需穿着件数（只数装备槽中的成员件）；升序，且 ≤ members 数量。"
+          },
+          "effects": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "$ref": "urn:move-idle:schema:common:v1#/$defs/effect_primitive" },
+            "description": "达标档效果：复用传奇四原语封闭集，数值固定不随 ilvl roll。"
+          }
+        }
+      }
+    }
+  }
+}

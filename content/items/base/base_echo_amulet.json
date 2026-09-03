@@ -1,0 +1,11 @@
+{
+  "id": "base_echo_amulet",
+  "name": "回响护符",
+  "flavor": "贴在胸口，能感到微弱而规律的震颤。",
+  "slot": "trinket",
+  "category": "amulet",
+  "material_tier": 1,
+  "implicit_mods": [
+    { "attribute": "damage_reduction", "value": 3 }
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "id": "affix_legend_berserk_heart",
+  "name": "狂暴之心",
+  "kind": "legendary",
+  "flavor": "心跳追不上手。",
+  "legendary": {
+    "effects": [
+      { "type": "stat_amp", "attribute": "attack_speed", "operation": "multiply", "value": 1.25 }
+    ],
+    "power_rating": 7
+  }
+}

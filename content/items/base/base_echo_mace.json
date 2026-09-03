@@ -1,0 +1,11 @@
+{
+  "id": "base_echo_mace",
+  "name": "回响晨星锤",
+  "flavor": "每一次落地都能听到迟来的第二声回响。",
+  "slot": "weapon",
+  "category": "mace",
+  "material_tier": 1,
+  "implicit_mods": [
+    { "attribute": "attack_power", "value": 10 }
+  ]
+}

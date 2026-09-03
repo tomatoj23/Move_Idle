@@ -1,0 +1,7 @@
+{
+  "id": "attack_power",
+  "name": "攻击强度",
+  "description": "决定每次攻击的基础伤害量。",
+  "aggregation": "add",
+  "category": "offense"
+}

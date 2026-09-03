@@ -1,0 +1,7 @@
+{
+  "id": "dt_weapon_tier1",
+  "name": "一级武器池",
+  "entries": [
+    { "type": "base", "ref": "base_sword_long_iron", "weight": 100 }
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "id": "move_speed",
+  "name": "移动速度",
+  "description": "横版行进速度，同时影响推进节拍。",
+  "aggregation": "add",
+  "category": "utility"
+}

@@ -1,0 +1,11 @@
+{
+  "id": "base_magma_greatsword",
+  "name": "熔核巨剑",
+  "flavor": "炉心铸就，剑身永不冷却。",
+  "slot": "weapon",
+  "category": "sword",
+  "material_tier": 1,
+  "implicit_mods": [
+    { "attribute": "attack_power", "value": 14 }
+  ]
+}

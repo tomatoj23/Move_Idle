@@ -1,0 +1,12 @@
+{
+  "id": "affix_legend_frost_soul",
+  "name": "寒霜之魂",
+  "kind": "legendary",
+  "flavor": "血是热的，但出来时已经是冰碴。",
+  "legendary": {
+    "effects": [
+      { "type": "convert_damage", "from_type": "physical", "to_type": "cold", "percent": 100 }
+    ],
+    "power_rating": 8
+  }
+}

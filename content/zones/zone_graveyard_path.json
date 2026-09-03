@@ -1,0 +1,13 @@
+{
+  "id": "zone_graveyard_path",
+  "name": "墓园小径",
+  "flavor": "月照旧坟，路是新客踩出来的。",
+  "level": 1,
+  "encounters": [
+    { "monster": "mob_skeleton_warrior", "count": 2 },
+    { "monster": "mob_skeleton_warrior", "count": 3 },
+    { "monster": "mob_skeleton_warrior", "count": 5 }
+  ],
+  "boss": "mob_bone_warden",
+  "order": 1
+}

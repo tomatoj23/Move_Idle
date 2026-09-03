@@ -1,0 +1,7 @@
+{
+  "id": "fire_damage_multiplier",
+  "name": "火焰伤害系数",
+  "description": "火焰类伤害的乘算系数，基准 1.0。",
+  "aggregation": "multiply",
+  "category": "offense"
+}

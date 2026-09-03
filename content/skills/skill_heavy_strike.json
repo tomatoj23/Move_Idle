@@ -1,0 +1,9 @@
+{
+  "id": "skill_heavy_strike",
+  "name": "重斩",
+  "flavor": "把全身力气压进一次挥砍里。",
+  "multiplier": 2.0,
+  "cooldown_ticks": 50,
+  "damage_type": "physical",
+  "unlock_level": 1
+}

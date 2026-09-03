@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:move-idle:schema:skill:v1",
+  "title": "技能（主动战斗动作配方）",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "name", "multiplier", "cooldown_ticks", "damage_type", "unlock_level"],
+  "properties": {
+    "id": { "$ref": "urn:move-idle:schema:common:v1#/$defs/id" },
+    "name": { "$ref": "urn:move-idle:schema:common:v1#/$defs/name" },
+    "flavor": { "$ref": "urn:move-idle:schema:common:v1#/$defs/flavor" },
+    "profession": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(_[a-z0-9]+)*$",
+      "description": "可选。职业归属 id；MVP 单职业（可统一填写或留空），字段为未来多职业扩展预留（#13 拍板 Q8=B）。"
+    },
+    "multiplier": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "技能倍率：伤害公式的技能倍率因子。普攻恒 1.0 且不占技能槽（引擎行为）。"
+    },
+    "cooldown_ticks": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "冷却时长（100ms tick）。自动施放 = 冷却好即放，按槽位序取技能（#13 拍板 Q10=A）。"
+    },
+    "damage_type": {
+      "$ref": "urn:move-idle:schema:common:v1#/$defs/damage_type",
+      "description": "技能伤害类型；元素系数按对应 multiplier 属性聚合（#7 伤害公式）。"
+    },
+    "unlock_level": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "解锁等级：角色达到即自动解锁，可装配进主动技能槽。获取方式 = 等级解锁（#13 拍板 Q9=A）。"
+    }
+  }
+}

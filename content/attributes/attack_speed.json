@@ -1,0 +1,7 @@
+{
+  "id": "attack_speed",
+  "name": "攻击速度",
+  "description": "每秒攻击次数（次/秒）。tick 制下决定出手间隔：interval = round(10 / attack_speed)。",
+  "aggregation": "add",
+  "category": "offense"
+}

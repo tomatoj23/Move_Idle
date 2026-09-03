@@ -1,0 +1,11 @@
+{
+  "id": "base_magma_signet",
+  "name": "熔核印戒",
+  "flavor": "戒面上凝固的纹章，据说曾属于一位炉主。",
+  "slot": "trinket",
+  "category": "ring",
+  "material_tier": 1,
+  "implicit_mods": [
+    { "attribute": "crit_chance", "value": 3 }
+  ]
+}

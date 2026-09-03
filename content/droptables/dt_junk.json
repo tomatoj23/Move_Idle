@@ -1,0 +1,7 @@
+{
+  "id": "dt_junk",
+  "name": "杂物池",
+  "entries": [
+    { "type": "family", "ref": "sword_long", "weight": 100 }
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "id": "mobmod_swift",
+  "name": "迅捷",
+  "flavor": "它生前跑得快，死后也没慢下来。",
+  "mods": [
+    { "attribute": "move_speed", "operation": "multiply", "value": 1.5 }
+  ],
+  "grants_tags": ["fast"]
+}

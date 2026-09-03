@@ -1,0 +1,17 @@
+{
+  "id": "affix_sharp",
+  "name": "锋利",
+  "kind": "stat",
+  "position": "prefix",
+  "mods": [
+    {
+      "attribute": "attack_power",
+      "tiers": [
+        { "ilvl": 1, "min": 2, "max": 4 },
+        { "ilvl": 12, "min": 6, "max": 10 },
+        { "ilvl": 25, "min": 12, "max": 18 }
+      ]
+    }
+  ],
+  "allowed_slots": ["weapon"]
+}

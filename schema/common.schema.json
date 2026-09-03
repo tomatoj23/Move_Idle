@@ -1,0 +1,122 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:move-idle:schema:common:v1",
+  "title": "Move_Idle 内容数据公共定义 v1",
+  "description": "被所有类型 schema 引用的公共定义：id、文本字段、属性修改、档位、效果原语。",
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(_[a-z0-9]+)*$",
+      "description": "snake_case 稳定 id，全局唯一，且等于对象文件名（去 .json）。"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 40,
+      "description": "展示名（中文）。"
+    },
+    "flavor": {
+      "type": "string",
+      "maxLength": 300,
+      "description": "风味文本（中文，选填）。"
+    },
+    "ref": {
+      "$ref": "#/$defs/id",
+      "description": "对另一内容对象 id 的引用。"
+    },
+    "stat_value": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["attribute", "value"],
+      "properties": {
+        "attribute": { "$ref": "#/$defs/ref", "description": "属性注册表中的属性 id。" },
+        "value": { "type": "number" }
+      }
+    },
+    "stat_op": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["attribute", "operation", "value"],
+      "properties": {
+        "attribute": { "$ref": "#/$defs/ref" },
+        "operation": { "enum": ["add", "multiply"], "description": "add：按属性聚合方式叠加；multiply：乘算。" },
+        "value": { "type": "number" }
+      }
+    },
+    "tiered_stat_mod": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["attribute", "tiers"],
+      "properties": {
+        "attribute": { "$ref": "#/$defs/ref" },
+        "tiers": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["ilvl", "min", "max"],
+            "properties": {
+              "ilvl": { "type": "integer", "minimum": 1, "description": "该档位可掉落的最低物品等级门槛。" },
+              "min": { "type": "number", "description": "物品等级 1 基准区间下界，缩放公式归引擎。" },
+              "max": { "type": "number", "description": "物品等级 1 基准区间上界。" }
+            }
+          }
+        }
+      }
+    },
+    "damage_type": {
+      "enum": ["physical", "fire", "cold", "lightning", "poison", "arcane"],
+      "description": "伤害类型封闭枚举 v1；新增类型 = schema 版本升级。"
+    },
+    "effect_primitive": {
+      "description": "传奇效果原语 v1：封闭动词集合，传奇效果只能用这些原语组合表达。",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "attribute", "operation", "value"],
+          "properties": {
+            "type": { "const": "stat_amp" },
+            "attribute": { "$ref": "#/$defs/ref" },
+            "operation": { "enum": ["add", "multiply"] },
+            "value": { "type": "number" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "chance_percent", "damage_type", "damage_percent"],
+          "properties": {
+            "type": { "const": "proc_on_hit" },
+            "chance_percent": { "type": "number", "minimum": 0, "maximum": 100 },
+            "damage_type": { "$ref": "#/$defs/damage_type" },
+            "damage_percent": { "type": "number", "minimum": 0, "description": "以攻击力百分比计的伤害。" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "chance_percent", "effect", "amount_percent"],
+          "properties": {
+            "type": { "const": "proc_on_kill" },
+            "chance_percent": { "type": "number", "minimum": 0, "maximum": 100 },
+            "effect": { "enum": ["heal_percent_of_max_hp", "explode_fire"] },
+            "amount_percent": { "type": "number", "minimum": 0 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "from_type", "to_type", "percent"],
+          "properties": {
+            "type": { "const": "convert_damage" },
+            "from_type": { "$ref": "#/$defs/damage_type" },
+            "to_type": { "$ref": "#/$defs/damage_type" },
+            "percent": { "type": "number", "minimum": 0, "maximum": 100 }
+          }
+        }
+      ]
+    }
+  }
+}

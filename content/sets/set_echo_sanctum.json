@@ -1,0 +1,24 @@
+{
+  "id": "set_echo_sanctum",
+  "name": "回响圣所",
+  "flavor": "圣所早已倾颓，唯有回响仍在庇护持有人。",
+  "members": [
+    "base_echo_mace",
+    "base_echo_robe",
+    "base_echo_amulet"
+  ],
+  "tiers": [
+    {
+      "pieces": 2,
+      "effects": [
+        { "type": "stat_amp", "attribute": "max_hp", "operation": "multiply", "value": 1.12 }
+      ]
+    },
+    {
+      "pieces": 3,
+      "effects": [
+        { "type": "proc_on_kill", "chance_percent": 20, "effect": "heal_percent_of_max_hp", "amount_percent": 4 }
+      ]
+    }
+  ]
+}

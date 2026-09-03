@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:move-idle:schema:attribute:v1",
+  "title": "属性定义（属性注册表成员）",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "name", "aggregation"],
+  "properties": {
+    "id": { "$ref": "urn:move-idle:schema:common:v1#/$defs/id" },
+    "name": { "$ref": "urn:move-idle:schema:common:v1#/$defs/name" },
+    "description": {
+      "type": "string",
+      "maxLength": 200,
+      "description": "给编辑器和 LLM 看的属性说明（生成词缀时作为上下文）。"
+    },
+    "aggregation": {
+      "enum": ["add", "multiply"],
+      "description": "多来源聚合方式：add 相加（平直值或同单位百分比），multiply 相乘（系数类，基准 1.0）。"
+    },
+    "category": { "enum": ["offense", "defense", "utility"] }
+  }
+}

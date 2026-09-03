@@ -1,0 +1,15 @@
+{
+  "id": "affix_of_fires",
+  "name": "之焰",
+  "kind": "stat",
+  "position": "suffix",
+  "mods": [
+    {
+      "attribute": "fire_damage_multiplier",
+      "tiers": [
+        { "ilvl": 8, "min": 1.05, "max": 1.12 },
+        { "ilvl": 20, "min": 1.15, "max": 1.25 }
+      ]
+    }
+  ]
+}

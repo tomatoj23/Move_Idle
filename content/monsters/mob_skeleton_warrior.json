@@ -1,0 +1,12 @@
+{
+  "id": "mob_skeleton_warrior",
+  "name": "骷髅武士",
+  "flavor": "死得太久，忘了怎么死透。",
+  "stats": {
+    "attack_power": 8,
+    "crit_chance": 5,
+    "move_speed": 60
+  },
+  "tags": ["melee", "undead"],
+  "drop_table": "dt_act1_graveyard"
+}

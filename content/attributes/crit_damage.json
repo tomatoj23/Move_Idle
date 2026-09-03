@@ -1,0 +1,7 @@
+{
+  "id": "crit_damage",
+  "name": "暴击伤害加成",
+  "description": "暴击时在 1.0 基础上追加的倍率（百分点，基准 50）。刻意做成属性而非引擎常量——暴击流 build 的生长点。",
+  "aggregation": "add",
+  "category": "offense"
+}

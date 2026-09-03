@@ -1,0 +1,7 @@
+{
+  "id": "max_hp",
+  "name": "生命上限",
+  "description": "战斗实体的血量上限；玩家基准值归引擎初始属性集（成长曲线归进度票）。",
+  "aggregation": "add",
+  "category": "defense"
+}

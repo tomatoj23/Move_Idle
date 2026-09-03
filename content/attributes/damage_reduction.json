@@ -1,0 +1,7 @@
+{
+  "id": "damage_reduction",
+  "name": "伤害减免",
+  "description": "受到伤害时按百分比减免（百分点，上限 95）。MVP 怪物侧为 0，属性注册待用。",
+  "aggregation": "add",
+  "category": "defense"
+}

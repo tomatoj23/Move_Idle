@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:move-idle:schema:item-base:v1",
+  "title": "装备基底（配方，非成品实例）",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "name", "slot", "category"],
+  "properties": {
+    "id": { "$ref": "urn:move-idle:schema:common:v1#/$defs/id" },
+    "name": { "$ref": "urn:move-idle:schema:common:v1#/$defs/name" },
+    "flavor": { "$ref": "urn:move-idle:schema:common:v1#/$defs/flavor" },
+    "slot": { "enum": ["weapon", "armor", "trinket"] },
+    "category": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(_[a-z0-9]+)*$",
+      "description": "槽位下的细类（sword、helm…）。开放词表：编辑器维护类别白名单，v2 可升级为注册表。"
+    },
+    "family": {
+      "$ref": "urn:move-idle:schema:common:v1#/$defs/ref",
+      "description": "可选。同款不同材质的家族 id（如 sword_long），家族由各基底上的该字段声明，无独立对象。"
+    },
+    "material_tier": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 1,
+      "description": "材质等级：同家族内越高越强越稀有。"
+    },
+    "implicit_mods": {
+      "type": "array",
+      "items": { "$ref": "urn:move-idle:schema:common:v1#/$defs/stat_value" },
+      "description": "固有属性（任何词缀 roll 之前就有）。"
+    },
+    "appearance": {
+      "type": "string",
+      "description": "表现层资源引用 id，选填；内容数据不依赖它存在。"
+    }
+  }
+}

@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:move-idle:schema:monster:v1",
+  "title": "基础怪物",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "name"],
+  "properties": {
+    "id": { "$ref": "urn:move-idle:schema:common:v1#/$defs/id" },
+    "name": { "$ref": "urn:move-idle:schema:common:v1#/$defs/name" },
+    "flavor": { "$ref": "urn:move-idle:schema:common:v1#/$defs/flavor" },
+    "stats": {
+      "type": "object",
+      "description": "基础属性：键必须是属性注册表中的属性 id。",
+      "propertyNames": { "$ref": "urn:move-idle:schema:common:v1#/$defs/id" },
+      "additionalProperties": { "type": "number" },
+      "minProperties": 1
+    },
+    "tags": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^[a-z0-9]+(_[a-z0-9]+)*$" },
+      "uniqueItems": true,
+      "description": "行为/风格标签（melee、undead…），开放词表。"
+    },
+    "drop_table": {
+      "$ref": "urn:move-idle:schema:common:v1#/$defs/ref",
+      "description": "掉落表引用，选填。"
+    },
+    "appearance": {
+      "type": "string",
+      "description": "表现层资源引用 id，选填。"
+    }
+  }
+}

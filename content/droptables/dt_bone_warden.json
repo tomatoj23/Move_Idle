@@ -1,0 +1,8 @@
+{
+  "id": "dt_bone_warden",
+  "name": "守墓人目标掉落",
+  "entries": [
+    { "type": "droptable", "ref": "dt_weapon_tier1", "weight": 70 },
+    { "type": "droptable", "ref": "dt_junk", "weight": 30 }
+  ]
+}

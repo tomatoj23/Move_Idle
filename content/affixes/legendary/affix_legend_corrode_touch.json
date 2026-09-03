@@ -1,0 +1,13 @@
+{
+  "id": "affix_legend_corrode_touch",
+  "name": "腐蚀之触",
+  "kind": "legendary",
+  "flavor": "碰过的地方都会烂，包括运气。",
+  "legendary": {
+    "effects": [
+      { "type": "proc_on_hit", "chance_percent": 25, "damage_type": "poison", "damage_percent": 45 }
+    ],
+    "power_rating": 6
+  },
+  "allowed_slots": ["weapon"]
+}

@@ -1,0 +1,24 @@
+{
+  "id": "set_magma_core",
+  "name": "熔核之誓",
+  "flavor": "誓约以火漆封缄：燃烧，直到烧尽敌人。",
+  "members": [
+    "base_magma_greatsword",
+    "base_magma_plate",
+    "base_magma_signet"
+  ],
+  "tiers": [
+    {
+      "pieces": 2,
+      "effects": [
+        { "type": "stat_amp", "attribute": "attack_speed", "operation": "multiply", "value": 1.10 }
+      ]
+    },
+    {
+      "pieces": 3,
+      "effects": [
+        { "type": "convert_damage", "from_type": "physical", "to_type": "fire", "percent": 25 }
+      ]
+    }
+  ]
+}

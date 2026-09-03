@@ -1,0 +1,14 @@
+{
+  "id": "affix_legend_dead_whisper",
+  "name": "亡者低语",
+  "kind": "legendary",
+  "flavor": "死人告诉活人：别停。",
+  "legendary": {
+    "effects": [
+      { "type": "proc_on_kill", "chance_percent": 15, "effect": "heal_percent_of_max_hp", "amount_percent": 3 },
+      { "type": "stat_amp", "attribute": "attack_speed", "operation": "multiply", "value": 1.1 }
+    ],
+    "power_rating": 7
+  },
+  "allowed_slots": ["trinket"]
+}

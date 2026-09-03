@@ -1,0 +1,12 @@
+{
+  "id": "affix_legend_flame_heart",
+  "name": "烈焰之心",
+  "kind": "legendary",
+  "flavor": "一半的怒气，改走火焰的路。",
+  "legendary": {
+    "effects": [
+      { "type": "convert_damage", "from_type": "physical", "to_type": "fire", "percent": 50 }
+    ],
+    "power_rating": 6
+  }
+}

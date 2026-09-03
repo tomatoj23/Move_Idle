@@ -1,0 +1,13 @@
+{
+  "id": "affix_legend_thunder_pierce",
+  "name": "雷霆贯击",
+  "kind": "legendary",
+  "flavor": "一声雷，从颅顶贯到脚底。",
+  "legendary": {
+    "effects": [
+      { "type": "proc_on_hit", "chance_percent": 20, "damage_type": "lightning", "damage_percent": 85 }
+    ],
+    "power_rating": 6
+  },
+  "allowed_slots": ["weapon"]
+}

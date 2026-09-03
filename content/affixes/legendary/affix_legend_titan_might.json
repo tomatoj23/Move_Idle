@@ -1,0 +1,12 @@
+{
+  "id": "affix_legend_titan_might",
+  "name": "泰坦之力",
+  "kind": "legendary",
+  "flavor": "巨人不闪避，巨人不需要。",
+  "legendary": {
+    "effects": [
+      { "type": "stat_amp", "attribute": "attack_power", "operation": "multiply", "value": 1.3 }
+    ],
+    "power_rating": 7
+  }
+}

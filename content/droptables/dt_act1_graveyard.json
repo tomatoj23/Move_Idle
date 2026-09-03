@@ -1,0 +1,9 @@
+{
+  "id": "dt_act1_graveyard",
+  "name": "墓园常规掉落",
+  "entries": [
+    { "type": "droptable", "ref": "dt_weapon_tier1", "weight": 40 },
+    { "type": "family", "ref": "sword_long", "weight": 35 },
+    { "type": "droptable", "ref": "dt_junk", "weight": 25 }
+  ]
+}

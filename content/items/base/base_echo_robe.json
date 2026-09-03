@@ -1,0 +1,11 @@
+{
+  "id": "base_echo_robe",
+  "name": "回响法袍",
+  "flavor": "衣袂摆动时，总像有人跟在身后。",
+  "slot": "armor",
+  "category": "robe",
+  "material_tier": 1,
+  "implicit_mods": [
+    { "attribute": "max_hp", "value": 30 }
+  ]
+}

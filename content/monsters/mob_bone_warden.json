@@ -1,0 +1,13 @@
+{
+  "id": "mob_bone_warden",
+  "name": "白骨守墓人",
+  "flavor": "它守的不是墓，是墓里还没烂完的东西。",
+  "stats": {
+    "max_hp": 120,
+    "attack_power": 14,
+    "crit_chance": 5,
+    "move_speed": 55
+  },
+  "tags": ["melee", "undead", "boss"],
+  "drop_table": "dt_bone_warden"
+}

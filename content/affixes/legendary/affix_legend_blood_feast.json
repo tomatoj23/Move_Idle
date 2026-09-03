@@ -1,0 +1,12 @@
+{
+  "id": "affix_legend_blood_feast",
+  "name": "血之盛宴",
+  "kind": "legendary",
+  "flavor": "每一具倒下的尸体，都是一盏回血的灯。",
+  "legendary": {
+    "effects": [
+      { "type": "proc_on_kill", "chance_percent": 30, "effect": "heal_percent_of_max_hp", "amount_percent": 5 }
+    ],
+    "power_rating": 6
+  }
+}

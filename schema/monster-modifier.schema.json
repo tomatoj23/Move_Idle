@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:move-idle:schema:monster-modifier:v1",
+  "title": "怪物修饰符（精英/稀有变体构件）",
+  "description": "与装备词缀是不同类型对象，但共享同一套注册表校验与 LLM 生成管线。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "name", "mods"],
+  "properties": {
+    "id": { "$ref": "urn:move-idle:schema:common:v1#/$defs/id" },
+    "name": { "$ref": "urn:move-idle:schema:common:v1#/$defs/name", "description": "修饰语（如「迅捷的」），展示为 精英前缀 + 怪物名。" },
+    "flavor": { "$ref": "urn:move-idle:schema:common:v1#/$defs/flavor" },
+    "mods": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "urn:move-idle:schema:common:v1#/$defs/stat_op" }
+    },
+    "grants_tags": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^[a-z0-9]+(_[a-z0-9]+)*$" },
+      "uniqueItems": true,
+      "description": "附加行为标签（如 fast）。"
+    }
+  }
+}

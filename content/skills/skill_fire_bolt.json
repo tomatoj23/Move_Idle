@@ -1,0 +1,9 @@
+{
+  "id": "skill_fire_bolt",
+  "name": "火弹",
+  "flavor": "指尖凝出的一点炉火，扔出去就不回来了。",
+  "multiplier": 2.2,
+  "cooldown_ticks": 60,
+  "damage_type": "fire",
+  "unlock_level": 5
+}

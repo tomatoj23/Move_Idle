@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:move-idle:schema:zone:v1",
+  "title": "区域",
+  "description": "进度结构的内容单元：固定有序普通遭遇 + 首领收尾。难度阶缩放（档乘数、步长）与推进规则归引擎。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "name", "level", "encounters", "boss", "order"],
+  "properties": {
+    "id": { "$ref": "urn:move-idle:schema:common:v1#/$defs/id" },
+    "name": { "$ref": "urn:move-idle:schema:common:v1#/$defs/name" },
+    "flavor": { "$ref": "urn:move-idle:schema:common:v1#/$defs/flavor" },
+    "level": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "基准有效等级：第 0 阶怪物有效等级，也是本区域基准掉落 ilvl 锚。第 n 阶有效等级 = level + n×步长（步长归引擎）。"
+    },
+    "encounters": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["monster"],
+        "properties": {
+          "monster": { "$ref": "urn:move-idle:schema:common:v1#/$defs/ref" },
+          "count": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 5,
+            "default": 1,
+            "description": "该场遭遇的同屏怪数（1~5），缺省 1；展开语义归引擎加载器。"
+          }
+        }
+      },
+      "description": "普通遭遇的有序清单，按推进顺序逐场遭遇：每项 = 怪物 ref + 同屏数量。多怪语义见 docs/design/multi-monster-encounters.md。"
+    },
+    "boss": {
+      "$ref": "urn:move-idle:schema:common:v1#/$defs/ref",
+      "description": "首领 monster id：区域通关与难度阶解锁的承载者，目标掉落锚点（其 drop_table）。首领固定单挑（count 恒 1）。"
+    },
+    "order": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "区域推进序号：区域链按 order 线性解锁。"
+    }
+  }
+}

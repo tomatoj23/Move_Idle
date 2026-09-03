@@ -1,0 +1,13 @@
+{
+  "id": "affix_legend_ember_wake",
+  "name": "余烬觉醒",
+  "kind": "legendary",
+  "flavor": "剑身里的火从未熄灭，它只是在等一具尸体。",
+  "legendary": {
+    "effects": [
+      { "type": "proc_on_kill", "chance_percent": 20, "effect": "explode_fire", "amount_percent": 60 }
+    ],
+    "power_rating": 7
+  },
+  "allowed_slots": ["weapon"]
+}

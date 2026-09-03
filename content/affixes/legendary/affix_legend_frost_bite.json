@@ -1,0 +1,13 @@
+{
+  "id": "affix_legend_frost_bite",
+  "name": "霜咬",
+  "kind": "legendary",
+  "flavor": "先咬一口，再慢慢冻透。",
+  "legendary": {
+    "effects": [
+      { "type": "proc_on_hit", "chance_percent": 30, "damage_type": "cold", "damage_percent": 40 }
+    ],
+    "power_rating": 5
+  },
+  "allowed_slots": ["weapon"]
+}

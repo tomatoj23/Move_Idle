@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:move-idle:schema:droptable:v1",
+  "title": "掉落表",
+  "description": "独立的加权掉落规则；权重语义（归一化、次数 roll）由引擎实现，本 schema 只管结构与引用。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "entries"],
+  "properties": {
+    "id": { "$ref": "urn:move-idle:schema:common:v1#/$defs/id" },
+    "name": { "$ref": "urn:move-idle:schema:common:v1#/$defs/name" },
+    "entries": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type", "ref", "weight"],
+        "properties": {
+          "type": {
+            "enum": ["base", "family", "droptable"],
+            "description": "base：掉指定基底（运行时 roll 词缀成实例）；family：掉该家族任一基底（按材质等级加权，规则归引擎）；droptable：嵌套子表。"
+          },
+          "ref": { "$ref": "urn:move-idle:schema:common:v1#/$defs/ref" },
+          "weight": { "type": "number", "exclusiveMinimum": 0 }
+        }
+      }
+    }
+  }
+}

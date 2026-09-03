@@ -1,0 +1,7 @@
+{
+  "id": "crit_chance",
+  "name": "暴击几率",
+  "description": "攻击造成暴击的概率（百分点）。暴击伤害倍率归引擎常量。",
+  "aggregation": "add",
+  "category": "offense"
+}

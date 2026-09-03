@@ -1,0 +1,11 @@
+{
+  "id": "base_magma_plate",
+  "name": "熔核胸甲",
+  "flavor": "余温尚存的甲片，握久了会发烫。",
+  "slot": "armor",
+  "category": "plate",
+  "material_tier": 1,
+  "implicit_mods": [
+    { "attribute": "damage_reduction", "value": 5 }
+  ]
+}

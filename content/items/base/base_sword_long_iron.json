@@ -1,0 +1,12 @@
+{
+  "id": "base_sword_long_iron",
+  "name": "铁制长剑",
+  "flavor": "农家铁匠铺也能打出来的东西，但足以放血。",
+  "slot": "weapon",
+  "category": "sword",
+  "family": "sword_long",
+  "material_tier": 1,
+  "implicit_mods": [
+    { "attribute": "attack_power", "value": 12 }
+  ]
+}
