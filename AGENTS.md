@@ -20,7 +20,7 @@ MVP design decisions index (task-based routing + issue-to-doc lookup + supersess
 
 ### Godot 4.7 standards
 
-Engine pinned to 4.7.x (ADR-0001); agent training data is only reliable through Godot 4.4. When writing or reviewing GDScript/scenes, touching project settings or export presets, using any API that may postdate 4.4, or fixing a red CI validation run: run the verification flow and hard rules in `docs/agents/godot-standards.md` before coding.
+Engine pinned to 4.7.x (ADR-0001); agent training data is only reliable through Godot 4.4. When writing or reviewing GDScript/scenes/shaders, touching project settings or export presets, writing or revising any repo doc that references engine capabilities or APIs (design docs, ADRs, task plans, CONTEXT.md, research notes), using any API that may postdate 4.4, or fixing a red CI validation run: run the verification flow and hard rules in `docs/agents/godot-standards.md` before coding, or before finalizing those docs. Compliance constraints in that page outrank any task methodology (including skill-provided workflows). When handing a diff to a skill subagent (e.g. the code-review Standards axis), include `docs/agents/godot-standards.md` in the reference list you pass it.
 
 ### Process audit
 
