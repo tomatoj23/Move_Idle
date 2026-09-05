@@ -284,11 +284,14 @@ static func _display_name(base_rec: Dictionary, rarity: String, is_set_piece: bo
 
 
 ## 前后缀用词：各取抽到的第一条；position=any 可补任一侧，同一条只占一个位置。
+## 传奇词缀不参与命名（它的 name 是完整装备名，不是前后缀词）。
 static func _name_words(rolls: Array, ctx: Dictionary) -> Dictionary:
 	var words := {"prefix": "", "suffix": ""}
 	var any_words: Array = []
 	for r in rolls:
 		var rec: Dictionary = ctx["affixes"][String(r["affix"])]
+		if String(rec.get("kind", "")) == "legendary":
+			continue
 		var name := String(rec["name"])
 		match String(rec.get("position", "")):
 			"prefix":

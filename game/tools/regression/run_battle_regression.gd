@@ -121,6 +121,8 @@ func _initialize() -> void:
 	_run_drop_affixes(tmp)
 	_section("drop: display names and set-piece rarity floor")
 	_run_drop_naming(tmp)
+	_section("drop instance is wearable as-is (#33 seam)")
+	_run_drop_wearable(tmp)
 	_section("drop: event contract and determinism")
 	_run_drop_determinism(tmp)
 
@@ -1487,6 +1489,24 @@ func _run_drop_affixes(tmp: String) -> void:
 	var high_rolls := _count_at_least(drops, 10.0)
 	_check(high_rolls > 0, "ilvl 25 lets the high tier into the pool (%d high rolls)" % high_rolls)
 
+	# 传奇数值固定不随 ilvl roll：ilvl 1 与 ilvl 25 的传奇条目逐字相同（values 恒空）
+	var legend_shapes := {}
+	for zone_level in [1, 25]:
+		var ldb := _load_db(_write_loot_db(tmp.path_join("loot_leg_%d" % zone_level),
+				zone_level, {}))
+		var ls := _drop_sample(ldb, REF_LOOT_BOSS, 60)
+		for d in ls["drops"]:
+			if String(d["instance"]["rarity"]) != "legendary":
+				continue
+			for a in d["instance"]["affixes"]:
+				if String(ldb.affixes[String(a["affix"])]["kind"]) != "legendary":
+					continue
+				legend_shapes[JSON.stringify({"affix": String(a["affix"]),
+						"values": a["values"]})] = true
+	_check(legend_shapes.size() == 1
+					and legend_shapes.has(JSON.stringify({"affix": "affix_d_leg", "values": []})),
+			"legendary values never roll with ilvl: one fixed entry shape at ilvl 1 and 25")
+
 
 ## AC: 显示名按稀有度规则生成；套装件稀有度低于稀有档钳到稀有档，显示名恒为基底名。
 func _run_drop_naming(tmp: String) -> void:
@@ -1540,6 +1560,128 @@ func _run_drop_naming(tmp: String) -> void:
 			name_bad += 1
 	_check(floor_bad == 0, "set pieces clamp up to rare when the rarity roll lands lower")
 	_check(name_bad == 0, "set pieces keep their exclusive base name (no prefix/suffix composition)")
+	# 钳档必须真的按稀有档生成（3~4 条词缀），不是只把标签改成稀有
+	var set_band_bad := 0
+	for d in sdrops:
+		var inst: Dictionary = d["instance"]
+		if String(inst["rarity"]) != "rare":
+			continue
+		var n := (inst["affixes"] as Array).size()
+		if n < 3 or n > 4:
+			set_band_bad += 1
+	_check(set_band_bad == 0, "clamped set pieces are generated at the rare band (3~4 affixes)")
+
+
+## #32 -> #33 接缝：掉出来的实例必须能被会话门面直接当装备消费（CONTEXT「自动拾取」：
+## drop 事件发生即入背包；#33 负责入包与穿戴）。本票钉住的是实例形状本身可穿戴，
+## 不让 #33 开工第一天撞上格式墙。
+func _run_drop_wearable(tmp: String) -> void:
+	var db := _load_db(_write_loot_db(tmp.path_join("loot_wear"), 25, {}))
+	if not db.errors.is_empty():
+		return
+	var sample := _drop_sample(db, REF_LOOT_BOSS, 60)
+	_check(int(sample["error_runs"]) == 0, "wearable seam: 60 boss runs are clean")
+	var drops: Array = sample["drops"]
+	_check(drops.size() == 60, "wearable seam: 60 boss kills -> 60 drops")
+	if drops.is_empty():
+		return
+	# 挑一件带 attack_power 词缀的非传奇掉落实例——普通档 0 词缀推不出数值进聚合链，
+	# 传奇档还带 stat_amp 乘算（归下面那条两阶段断言）。
+	var inst: Dictionary = {}
+	var ap_bonus := 0.0
+	for d in drops:
+		var cand: Dictionary = d["instance"]
+		if String(cand["rarity"]) == "legendary":
+			continue
+		var bonus := 0.0
+		for a in cand["affixes"]:
+			for v in a["values"]:
+				if String(v["attribute"]) == "attack_power":
+					bonus += float(v["value"])
+		if bonus > 0.0:
+			inst = cand
+			ap_bonus = bonus
+			break
+	_check(ap_bonus > 0.0,
+			"the sample includes a drop carrying an attack_power affix (+%.2f)" % ap_bonus)
+	if ap_bonus <= 0.0:
+		return
+	_check(String(db.item_bases[String(inst["base"])]["slot"]) == "weapon",
+			"the dropped base belongs to the weapon slot")
+
+	# 原样穿上掉落实例：词缀数值必须进聚合链（fixture 基底无固有属性）。
+	var worn := {"player_level": 1, "equipment": {"weapon": inst}, "skills": []}
+	var rw := SessionFacade.run_encounter(worn, db, REF_LOOT_BOSS)
+	_check(not rw.has("errors"), "a dropped instance is wearable as-is (no reshaping)")
+	if rw.has("errors"):
+		for e in rw["errors"]:
+			print(ANCHOR + "   facade error: " + e)
+		return
+	var first = null
+	for e in rw["events"]:
+		if String(e["type"]) == "on_attack" and String(e["attacker"]) == "player":
+			first = e
+			break
+	_check(first != null, "wearing the drop still produces player attacks")
+	if first == null:
+		return
+	var crit_factor := 1.0
+	if bool(first["crit"]):
+		crit_factor = 1.0 + CRIT_DAMAGE_BASE / 100.0
+	var expect := floori((P1["attack_power"] + ap_bonus) * crit_factor)
+	_check(int(first["raw_damage"]) == expect,
+			"worn drop: first hit %d = floor((10 base + %.2f affix AP) x %s)"
+					% [int(first["raw_damage"]), ap_bonus, str(crit_factor)])
+
+	# 传奇实例（values 恒空、数值固定于内容）同样原样可穿；stat_amp 走乘算且
+	# 两阶段先加后乘：(10 + 5 词缀) x 1.3，而不是 (10 x 1.3) + 5。
+	var legend_shape := JSON.stringify({"affix": "affix_d_leg", "values": []})
+	var leg_amp := 0.0
+	for e in db.affixes["affix_d_leg"]["legendary"]["effects"]:
+		if String(e["type"]) == "stat_amp" and String(e["attribute"]) == "attack_power":
+			leg_amp = float(e["value"])
+	_check(leg_amp > 0.0, "the fixture legendary carries a stat_amp on attack_power (%.2f)" % leg_amp)
+	var legend_inst := {"base": "base_loot_blade", "rarity": "legendary", "ilvl": 25,
+			"name": "Doombringer", "affixes": [
+					{"affix": "affix_d_leg", "values": []},
+					{"affix": "affix_d_suf2", "values": [
+							{"attribute": "attack_power", "value": 5.0}]}]}
+	var rl := SessionFacade.run_encounter({"player_level": 1,
+			"equipment": {"weapon": legend_inst}, "skills": []}, db, REF_LOOT_BOSS)
+	_check(not rl.has("errors"), "a legendary instance (empty values) is wearable too")
+	if not rl.has("errors"):
+		var lfirst = null
+		for e in rl["events"]:
+			if String(e["type"]) == "on_attack" and String(e["attacker"]) == "player":
+				lfirst = e
+				break
+		_check(lfirst != null, "legendary drop: player still attacks")
+		if lfirst != null:
+			var lcrit := 1.0
+			if bool(lfirst["crit"]):
+				lcrit = 1.0 + CRIT_DAMAGE_BASE / 100.0
+			var l_expect := floori((P1["attack_power"] + 5.0) * leg_amp * lcrit)
+			_check(int(lfirst["raw_damage"]) == l_expect,
+					"legendary drop: hit %d = floor((10 + 5 add) x %.2f stat_amp x %s), two-phase"
+							% [int(lfirst["raw_damage"]), leg_amp, str(lcrit)])
+
+	# drop 产出的传奇条目与穿戴路径期望的形状逐字一致
+	var legend_entries := {}
+	for d in drops:
+		if String(d["instance"]["rarity"]) != "legendary":
+			continue
+		for a in d["instance"]["affixes"]:
+			if String(db.affixes[String(a["affix"])]["kind"]) == "legendary":
+				legend_entries[JSON.stringify({"affix": String(a["affix"]),
+						"values": a["values"]})] = true
+	_check(legend_entries.size() == 1 and legend_entries.has(legend_shape),
+			"legendary entries in drops are exactly the wearable shape {affix, values: []}")
+
+	# 槽位校验对掉落实例同样生效（#33 穿戴路径的前置执法）
+	var wrong_slot := SessionFacade.run_encounter({"player_level": 1,
+			"equipment": {"armor": inst}, "skills": []}, db, REF_LOOT_BOSS)
+	_check(_has_error(wrong_slot, "cannot go into slot"),
+			"a dropped weapon is refused by the armor slot like any other instance")
 
 
 ## AC: 掉落事件进入事件流；载荷封闭；固定输入下分布稳定可复现。
@@ -1583,10 +1725,14 @@ func _run_drop_determinism(tmp: String) -> void:
 			order_bad += 1
 	_check(order_bad == 0, "every drop event directly follows the on_kill that produced it")
 
-	# 分布可复现：两次同输入采样得到同一份稀有度分布
+	# 分布可复现：两次同输入采样得到同一份稀有度分布与词缀数分布
 	var s1 := _rarity_counts(_drop_sample(db, REF_LOOT_FIRST, 20)["drops"])
 	var s2 := _rarity_counts(_drop_sample(db, REF_LOOT_FIRST, 20)["drops"])
 	_check(JSON.stringify(s1) == JSON.stringify(s2), "rarity distribution is reproducible")
+	var h1 := _affix_histogram(_drop_sample(db, REF_LOOT_FIRST, 20)["drops"])
+	var h2 := _affix_histogram(_drop_sample(db, REF_LOOT_FIRST, 20)["drops"])
+	_check(JSON.stringify(h1) == JSON.stringify(h2), "affix-count distribution is reproducible")
+	_check(_dict_total(h1) > 0, "affix-count histogram is populated (%d buckets)" % h1.size())
 
 	# 一次调用即一场遭遇、不共享随机状态：夹进别的遭遇后重跑，掉落逐字一致
 	# （离线补算就是逐场调用同一入口，同构性由此成立）。
@@ -1733,6 +1879,15 @@ func _rarity_counts(drops: Array) -> Dictionary:
 		if counts.has(rarity):
 			counts[rarity] = int(counts[rarity]) + 1
 	return counts
+
+
+## 稀有度 -> 词缀数直方图（AC「词缀数分布稳定可复现」）。
+func _affix_histogram(drops: Array) -> Dictionary:
+	var hist := {}
+	for d in drops:
+		var key := String(d["instance"]["rarity"]) + ":" + str((d["instance"]["affixes"] as Array).size())
+		hist[key] = int(hist.get(key, 0)) + 1
+	return hist
 
 
 func _base_counts(drops: Array) -> Dictionary:
