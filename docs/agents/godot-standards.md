@@ -99,11 +99,11 @@
 
 ## 机器执法（headless 校验）
 
-仓库 CI（`.github/workflows/ci.yml`）在 `new-game-project/` 变更时自动执行：Godot 4.7.2-stable headless 导入 → `tools/validation/check_project.gd` 全量加载检查（脚本编译 + 场景/资源加载），任何 `SCRIPT ERROR` / `Parse Error` 直接红。CI 另含**反模式 lint**：命中可静态匹配的 4.5+ 已改名/已移除 API（`device == 0`、`size_in_percent`、带参 `get_as_text()`、`duplicate(true)` 等）同样直接红。**红了先修到绿，再继续其余工作。**
+仓库 CI（`.github/workflows/ci.yml`）在 `game/` 变更时自动执行：Godot 4.7.2-stable headless 导入 → `tools/validation/check_project.gd` 全量加载检查（脚本编译 + 场景/资源加载），任何 `SCRIPT ERROR` / `Parse Error` 直接红。CI 另含**反模式 lint**：命中可静态匹配的 4.5+ 已改名/已移除 API（`device == 0`、`size_in_percent`、带参 `get_as_text()`、`duplicate(true)` 等）同样直接红。**红了先修到绿，再继续其余工作。**
 
 本地同款命令（把 `godot` 换成本机编辑器路径）：
 
-    godot --headless --path new-game-project --script res://tools/validation/check_project.gd
+    godot --headless --path game --script res://tools/validation/check_project.gd
 
 提交时另有 **pre-commit 钩子**（`.githooks/pre-commit`）自动跑同款反模式 lint，命中即拒绝提交。新克隆装机：`git config core.hooksPath .githooks`。
 

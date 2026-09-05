@@ -1,6 +1,6 @@
 extends SceneTree
 ## 机器执法层：headless 全量加载检查（脚本编译 + 场景/资源加载）。
-## 用法（在 new-game-project 目录下，或用 --path 指定项目）：
+## 用法（在 game 目录下，或用 --path 指定项目）：
 ##   godot --headless --path . --script res://tools/validation/check_project.gd
 ## 退出码 0 = 全部通过；1 = 存在加载/编译失败。CI（.github/workflows/ci.yml）跑的就是它。
 ## 编码规范见 docs/agents/godot-standards.md。
