@@ -7,13 +7,18 @@ extends RefCounted
 ## #30 增量：传奇词缀实例免 values（效果数值固定于内容，#8 约定）；四效果原语
 ## 求值——stat_amp 并入聚合链，proc_on_hit / proc_on_kill / convert_damage 交给
 ## EncounterSim（套装阶梯接入后复用同一求值器）。
+## #31 增量：技能装配三槽执法（超过三槽 / 同一技能装多槽 = 状态非法报错——
+## 同 id 多槽共享一份冷却，第二槽是永远放不出的死槽，绝不静默运行）；解锁判定
+## 纯等级（level >= unlock_level 即可装配，无任何额外系统，build-system #2.3）。
 ## 进度推进、掉落、离线补算、落盘由后续票接入；new_state 目前为输入状态原样透传
 ## （遭遇内血量是瞬态不入档——「遭遇间玩家回满」由每场从满血起算直接成立，
 ## save-persistence §3 既定）。
-## 确定性：种子从输入派生（zone + encounter + level），同输入必得同事件流。
+## 确定性：种子从**完整输入**派生（区域、遭遇、等级、技能装配、装备形状）——
+## 同输入必得同事件流；同关同级不同 build 不共享随机序列。
 
 const TICK_MS := 100  # 引擎常量：tick 间隔，集中管理点（#24 引擎常量条款）
 const BOSS_ENCOUNTER := -1  # encounter_index 哨兵：首领固定单挑（multi-monster-encounters #1）
+const SKILL_SLOTS := 3  # 引擎常量：三主动技能槽（build-system #2.2）
 
 
 ## 耗时换算：tick 是数值层原生时间单位，表现层 / 统计层需要毫秒时经此换算。
@@ -47,16 +52,29 @@ static func run_encounter(state: Dictionary, content_db: ContentDB, ref: Diction
 		errors.append("player_level must be >= 1")
 
 	var resolved_skills: Array = []
-	for sid in state.get("skills", []):
-		var rec = content_db.skills.get(String(sid))
-		if rec == null:
-			errors.append("unknown skill id: %s" % String(sid))
-			continue
-		if int(rec["unlock_level"]) > level:
-			errors.append("skill %s is locked (unlock_level %d > level %d)"
-					% [String(sid), int(rec["unlock_level"]), level])
-			continue
-		resolved_skills.append(rec)
+	var raw_skills = state.get("skills", [])
+	if not (raw_skills is Array):
+		errors.append("skills must be an array of skill ids (slot order)")
+	else:
+		if raw_skills.size() > SKILL_SLOTS:
+			errors.append("skill slots overflow: %d loaded > %d slots"
+					% [raw_skills.size(), SKILL_SLOTS])
+		var seen_skills := {}  # 同一技能禁止装多槽：共享一份冷却会让第二槽永远放不出
+		for sid in raw_skills:
+			var sid_str := String(sid)
+			if seen_skills.has(sid_str):
+				errors.append("skill %s loaded in more than one slot" % sid_str)
+				continue
+			seen_skills[sid_str] = true
+			var rec = content_db.skills.get(sid_str)
+			if rec == null:
+				errors.append("unknown skill id: %s" % sid_str)
+				continue
+			if int(rec["unlock_level"]) > level:
+				errors.append("skill %s is locked (unlock_level %d > level %d)"
+						% [sid_str, int(rec["unlock_level"]), level])
+				continue
+			resolved_skills.append(rec)
 
 	var equipped: Array = []
 	# 传奇效果收集（#30）：依装备槽序 × 实例词缀序 × 效果清单序展开，供遭遇模拟

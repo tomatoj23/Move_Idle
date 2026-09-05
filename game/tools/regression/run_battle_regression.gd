@@ -2,6 +2,8 @@ extends SceneTree
 ## #27 headless regression: content direct-load + stat aggregation + first encounter.
 ## #30 headless regression: multi-monster ordering + the four effect primitives
 ## (stat_amp / proc_on_hit / proc_on_kill heal+explode chain / convert_damage).
+## #31 headless regression: skill loadout (three slots, cooldown-ready cast in slot
+## order, unlock level boundary, build-axis difference, new_state passthrough).
 ## The ONLY seam under test is SessionFacade.run_encounter (spec #24 Testing Decisions);
 ## internal pure functions (aggregation / encounter sim / PRNG) are NOT tested directly.
 ## Run:
@@ -85,6 +87,10 @@ func _initialize() -> void:
 	_run_proc_explode(tmp)
 	_section("effect primitive: convert_damage")
 	_run_convert(content_root)
+	_section("skill slots: cast order and caps")
+	_run_skill_slots(tmp)
+	_section("skill build difference and state passthrough")
+	_run_skill_build_diff(content_root)
 
 	_rmtree(tmp)
 	_report()
@@ -634,6 +640,12 @@ func _run_state_assertions(content_root: String) -> void:
 	_check(SessionFacade.run_encounter(base, db, {"zone_id": "zone_graveyard_path", "encounter_index": 3}).has("errors"),
 			"encounter index out of range -> error")
 
+	# Unlock boundary, lower side: level 4 < unlock_level 5 -> fire bolt must refuse.
+	# (The == side is covered by the level-5 fire-bolt assertions in the win path.)
+	var lvl4 := {"player_level": 4, "equipment": {}, "skills": ["skill_fire_bolt"]}
+	_check(SessionFacade.run_encounter(lvl4, db, REF_FIRST).has("errors"),
+			"level 4 < unlock_level 5 -> fire bolt locked -> error")
+
 
 # ---------------------------------------------------------------- #30 sections
 
@@ -872,12 +884,12 @@ func _run_proc_explode(tmp: String) -> void:
 	var events: Array = r["events"]
 	_check(events.size() == 6, "cascade stream is exactly the 6 deterministic events")
 	var expected_seq: Array = [
-		{"type": "on_attack", "attacker": "player", "who": "mob_dry_leaf#1", "skill": "basic_attack", "element": "physical", "killer": "", "victim": ""},
-		{"type": "on_kill", "attacker": "", "who": "", "skill": "", "element": "", "killer": KILLER_PLAYER, "victim": "mob_dry_leaf#1"},
-		{"type": "on_attack", "attacker": "player", "who": "mob_dry_leaf#2", "skill": SKILL_EXPLODE_FIRE, "element": "fire", "killer": "", "victim": ""},
-		{"type": "on_kill", "attacker": "", "who": "", "skill": "", "element": "", "killer": KILLER_EXPLODE, "victim": "mob_dry_leaf#2"},
-		{"type": "on_attack", "attacker": "player", "who": "mob_dry_leaf#3", "skill": SKILL_EXPLODE_FIRE, "element": "fire", "killer": "", "victim": ""},
-		{"type": "on_kill", "attacker": "", "who": "", "skill": "", "element": "", "killer": KILLER_EXPLODE, "victim": "mob_dry_leaf#3"},
+		{"type": "on_attack", "attacker": "player", "target": "mob_dry_leaf#1", "skill": "basic_attack", "element": "physical", "killer": "", "victim": ""},
+		{"type": "on_kill", "attacker": "", "skill": "", "element": "", "killer": KILLER_PLAYER, "victim": "mob_dry_leaf#1"},
+		{"type": "on_attack", "attacker": "player", "target": "mob_dry_leaf#2", "skill": SKILL_EXPLODE_FIRE, "element": "fire", "killer": "", "victim": ""},
+		{"type": "on_kill", "attacker": "", "skill": "", "element": "", "killer": KILLER_EXPLODE, "victim": "mob_dry_leaf#2"},
+		{"type": "on_attack", "attacker": "player", "target": "mob_dry_leaf#3", "skill": SKILL_EXPLODE_FIRE, "element": "fire", "killer": "", "victim": ""},
+		{"type": "on_kill", "attacker": "", "skill": "", "element": "", "killer": KILLER_EXPLODE, "victim": "mob_dry_leaf#3"},
 	]
 	for i in mini(events.size(), expected_seq.size()):
 		var e: Dictionary = events[i]
@@ -962,3 +974,187 @@ func _run_convert(content_root: String) -> void:
 				bolt_ok = false
 	_check(basic_seen and basic_ok, "100% phys->cold convert: basic attacks report element cold")
 	_check(bolt_seen and bolt_ok, "fire bolts keep element fire (conversion only moves the physical share)")
+
+
+# ---------------------------------------------------------------- #31 sections
+
+## AC: 三主动槽，冷却好即放、按槽位序取，无优先级逻辑（build-system #2.2）。
+## Mini fixture：crit 归零词缀（stat_amp crit_chance -5，5.0 基准归零）消除随机，
+## 厚血怪墙（999999 HP / AP 1）拉长战斗让玩家出手远超 10 次，施放序列完全确定。
+## 冷却 20 的 A 与冷却 70 的 B 对调槽序，前 10 次出手的技能 id 序列随之翻转——
+## 「换一套装配，节奏与伤害就是不一样」（build-system §5 技能侧验收线）的最强形态。
+## 同段覆盖三槽上限与重复装配的门面拒绝（状态非法绝不静默，#24 实施决策 A）。
+func _run_skill_slots(tmp: String) -> void:
+	var case_dir := tmp.path_join("skill_slots")
+	_write_mini_db(case_dir, [_mini_monster("mob_wall", {
+		"max_hp": 999999.0, "attack_power": 1.0, "attack_speed": 1.0, "crit_chance": 0.0,
+	})], "mob_wall", {
+		"items/base/base_mini_blade.json": _mini_blade(0.0),
+		"affixes/affix_mini_steady.json": {"id": "affix_mini_steady", "name": "Mini Steady",
+				"kind": "legendary",
+				"legendary": {"effects": [{"type": "stat_amp", "attribute": "crit_chance",
+						"operation": "add", "value": -5}]}},
+		"affixes/affix_mini_ember.json": {"id": "affix_mini_ember", "name": "Mini Ember",
+				"kind": "legendary",
+				"legendary": {"effects": [{"type": "proc_on_hit", "chance_percent": 100,
+						"damage_type": "fire", "damage_percent": 50}]}},
+		"skills/skill_mini_a.json": {"id": "skill_mini_a", "name": "A", "multiplier": 3.0,
+				"cooldown_ticks": 20, "damage_type": "physical", "unlock_level": 1},
+		"skills/skill_mini_b.json": {"id": "skill_mini_b", "name": "B", "multiplier": 2.0,
+				"cooldown_ticks": 70, "damage_type": "physical", "unlock_level": 1},
+		"skills/skill_mini_c.json": {"id": "skill_mini_c", "name": "C", "multiplier": 1.5,
+				"cooldown_ticks": 10, "damage_type": "physical", "unlock_level": 1},
+		"skills/skill_mini_d.json": {"id": "skill_mini_d", "name": "D", "multiplier": 1.2,
+				"cooldown_ticks": 15, "damage_type": "physical", "unlock_level": 1},
+	})
+	var mdb := ContentDB.load_from_dir(case_dir)
+	_check(mdb.errors.is_empty(), "skill-slots mini db loads")
+	if not mdb.errors.is_empty():
+		for e in mdb.errors:
+			print(ANCHOR + "   load error: " + e)
+		return
+	var gear := {"weapon": {"base": "base_mini_blade", "affixes": [{"affix": "affix_mini_steady"}]}}
+	var ref := {"zone_id": "zone_mini", "encounter_index": 0}
+
+	# Slot order [A, B]: A opens (cd 20), B takes over at tick 10 (slot 0 cooling),
+	# basics fill the gaps. Golden sequence derived from "cooldown-ready, first in
+	# slot order" with attack interval 10 and no crits; the fight runs to tick ~1000
+	# (wall monster), so only the first 10 player actions are pinned.
+	var hits_ab := _player_hits(mdb, {"player_level": 1, "equipment": gear,
+			"skills": ["skill_mini_a", "skill_mini_b"]}, ref, "[A,B] build")
+	var seq_ab := _skill_sequence(hits_ab)
+	_check(seq_ab.slice(0, 10) == ["skill_mini_a", "skill_mini_b", "skill_mini_a", "basic_attack",
+			"skill_mini_a", "basic_attack", "skill_mini_a", "basic_attack",
+			"skill_mini_a", "skill_mini_b"],
+			"slot order [A,B]: cast sequence = cooldown-ready, first in slot order")
+
+	# Swapped slot order [B, A]: same pair, flipped cast sequence and flipped first
+	# hit damage (multiplier comes from the skill being cast).
+	var hits_ba := _player_hits(mdb, {"player_level": 1, "equipment": gear,
+			"skills": ["skill_mini_b", "skill_mini_a"]}, ref, "[B,A] build")
+	var seq_ba := _skill_sequence(hits_ba)
+	_check(seq_ba.slice(0, 10) == ["skill_mini_b", "skill_mini_a", "basic_attack", "skill_mini_a",
+			"basic_attack", "skill_mini_a", "basic_attack", "skill_mini_b",
+			"skill_mini_a", "basic_attack"],
+			"slot order [B,A]: same pair, flipped cast sequence")
+	_check(seq_ab != seq_ba, "swapping slots changes the battle rhythm (build axis exists)")
+	if hits_ab.size() > 0 and hits_ba.size() > 0:
+		_check(int(hits_ab[0]["raw_damage"]) == 30 and int(hits_ba[0]["raw_damage"]) == 20,
+				"first hit follows the cast skill multiplier (A 3.0 -> 30, B 2.0 -> 20)")
+
+	# Slot cap: four distinct loaded skills overflow the three active slots. The
+	# error must name the overflow (a stray locked-skill error must not satisfy this).
+	var over := {"player_level": 1, "equipment": {}, "skills": [
+			"skill_mini_a", "skill_mini_b", "skill_mini_c", "skill_mini_d"]}
+	_check(_has_error(SessionFacade.run_encounter(over, mdb, ref), "overflow"),
+			"four loaded skills -> over the three-slot cap -> error names the overflow")
+
+	# Duplicate: the same skill in two slots shares one cooldown, making slot 2 a
+	# silent dead slot -- the facade refuses instead of running it.
+	var dup := {"player_level": 1, "equipment": {}, "skills": ["skill_mini_a", "skill_mini_a"]}
+	_check(_has_error(SessionFacade.run_encounter(dup, mdb, ref), "more than one slot"),
+			"same skill in two slots -> error names the duplicate")
+
+	# Exactly three distinct skills fill the slots; slot 2 (C, cd 10) is picked up
+	# in slot order once A and B are both cooling -- the third slot leaves evidence
+	# in the event stream, not just a clean run.
+	var three := {"player_level": 1, "equipment": gear, "skills": [
+			"skill_mini_a", "skill_mini_b", "skill_mini_c"]}
+	var seq_three := _skill_sequence(_player_hits(mdb, three, ref, "[A,B,C] build"))
+	_check(seq_three.slice(0, 4) == ["skill_mini_a", "skill_mini_b", "skill_mini_a",
+			"skill_mini_c"],
+			"three slots: C (slot 2) casts in slot order while A and B cool")
+
+	# Skill main hits still roll proc_on_hit (AC: 命中触发照常判定；来源字段区分)：
+	# steady (crit 0) + ember (100% proc, 50% fire) on one weapon, slot 0 = C whose
+	# cd 10 equals the attack interval, so every action is C. The wall never dies,
+	# hence each main hit is followed by exactly one proc: pairs of [C, proc], proc
+	# raw = floor(10 x 50% x 1.0) = 5, no crit, element fire.
+	var ember_gear := {"weapon": {"base": "base_mini_blade", "affixes": [
+			{"affix": "affix_mini_steady"}, {"affix": "affix_mini_ember"}]}}
+	var hits_ce := _player_hits(mdb, {"player_level": 1, "equipment": ember_gear,
+			"skills": ["skill_mini_c"]}, ref, "skill+proc build")
+	var seq_ce := _skill_sequence(hits_ce)
+	_check(seq_ce.slice(0, 10) == ["skill_mini_c", SKILL_PROC_ON_HIT, "skill_mini_c",
+			SKILL_PROC_ON_HIT, "skill_mini_c", SKILL_PROC_ON_HIT, "skill_mini_c",
+			SKILL_PROC_ON_HIT, "skill_mini_c", SKILL_PROC_ON_HIT],
+			"skill main hits roll proc_on_hit right after; sources distinct in the stream")
+	var proc_ok := true
+	for i in [1, 3, 5, 7, 9]:
+		if int(hits_ce[i]["raw_damage"]) != 5 or bool(hits_ce[i]["crit"]) \
+				or String(hits_ce[i]["element"]) != "fire":
+			proc_ok = false
+	_check(proc_ok, "proc after skill hit: floor(10 x 50%) = 5, no crit, fire")
+
+
+## AC: 装配差异在真实内容上可感知（build-system §5）+ new_state 进出一致（#15
+## 存档票的接缝前提，#31 保证 skills 数组按槽位序不丢不变形）+ 三槽组合节奏
+## （槽 0 重斩先放，槽 1 火弹在重斩冷却中接管，普攻兜底）。crit 5% 由确定性
+## 种子决定——期望按 crit 双分支写，两分支集合无交集，断言与随机序列无关。
+func _run_skill_build_diff(content_root: String) -> void:
+	var db := _load_db(content_root)
+	if not db.errors.is_empty():
+		return
+	var bare := {"player_level": 1, "equipment": {}, "skills": []}
+	var rb := SessionFacade.run_encounter(bare, db, REF_FIRST)
+	_check(not rb.has("errors"), "bare build (no skills) runs without errors")
+	if rb.has("errors"):
+		return
+	var heavy := {"player_level": 1, "equipment": {}, "skills": ["skill_heavy_strike"]}
+	var rh := SessionFacade.run_encounter(heavy, db, REF_FIRST)
+	_check(not rh.has("errors"), "heavy-strike build runs without errors")
+	if rh.has("errors"):
+		return
+	var raw_b := int(rb["events"][0]["raw_damage"])
+	var raw_h := int(rh["events"][0]["raw_damage"])
+	_check(raw_b == 10 or raw_b == 15, "bare first hit = basic x1.0 (10, crit 15)")
+	_check(raw_h == 20 or raw_h == 30, "heavy build first hit = skill x2.0 (20, crit 30)")
+	_check(JSON.stringify(rb["events"]) != JSON.stringify(rh["events"]),
+			"different skill loadouts produce different event streams")
+
+	_check(JSON.stringify(rh["new_state"]["skills"]) == JSON.stringify(heavy["skills"]),
+			"new_state preserves the skill loadout verbatim (slot order intact)")
+
+	# Three-slot combo on real content at the unlock boundary (fire bolt unlocks
+	# at 5): slot 0 opens, slot 1 fires while slot 0 cools -- regardless of crits.
+	var lvl5 := {"player_level": 5, "equipment": {},
+			"skills": ["skill_heavy_strike", "skill_fire_bolt"]}
+	var r5 := SessionFacade.run_encounter(lvl5, db, REF_FIRST)
+	_check(not r5.has("errors"), "level == unlock_level 5 -> fire bolt unlocked and usable")
+	if r5.has("errors"):
+		return
+	var seq5 := _skill_sequence(_player_hits(db, lvl5, REF_FIRST, "level-5 combo"))
+	_check(seq5.size() >= 2 and seq5[0] == "skill_heavy_strike" and seq5[1] == "skill_fire_bolt",
+			"slot 0 heavy strike opens, slot 1 fire bolt takes over while heavy cools")
+
+
+## Runs one encounter and returns the player's on_attack events for sequence
+## assertions (caller owns the error check via the label).
+func _player_hits(db: ContentDB, state: Dictionary, ref: Dictionary, label: String) -> Array:
+	var r := SessionFacade.run_encounter(state, db, ref)
+	_check(not r.has("errors"), label + ": encounter runs without errors")
+	if r.has("errors"):
+		for e in r["errors"]:
+			print(ANCHOR + "   facade error: " + e)
+		return []
+	var hits: Array = (r["events"] as Array).filter(func(e):
+		return e["type"] == "on_attack" and e["attacker"] == "player")
+	return hits
+
+
+func _skill_sequence(hits: Array) -> Array:
+	var seq: Array = []
+	for h in hits:
+		seq.append(String(h["skill"]))
+	return seq
+
+
+## True when the facade result carries an error whose text contains `needle`
+## (asserts the refusal reason, not just "any error happened").
+func _has_error(result: Dictionary, needle: String) -> bool:
+	if not result.has("errors"):
+		return false
+	for e in result["errors"]:
+		if String(e).contains(needle):
+			return true
+	return false
