@@ -5,6 +5,7 @@
   "stats": {
     "max_hp": 120,
     "attack_power": 14,
+    "attack_speed": 0.75,
     "crit_chance": 5,
     "move_speed": 55
   },

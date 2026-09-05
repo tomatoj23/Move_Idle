@@ -3,7 +3,9 @@
   "name": "骷髅武士",
   "flavor": "死得太久，忘了怎么死透。",
   "stats": {
+    "max_hp": 40,
     "attack_power": 8,
+    "attack_speed": 1.0,
     "crit_chance": 5,
     "move_speed": 60
   },
