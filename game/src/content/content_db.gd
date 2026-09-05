@@ -266,10 +266,24 @@ func _assert_effects(effects: Array, path: String) -> bool:
 				ok = _has_fields(e, path, ["attribute", "operation", "value"]) and ok
 			"proc_on_hit":
 				ok = _has_fields(e, path, ["chance_percent", "damage_type", "damage_percent"]) and ok
+				if ok and not DAMAGE_TYPES.has(String(e["damage_type"])):
+					errors.append("%s: proc_on_hit damage_type must be a known damage type, got '%s'"
+							% [path, String(e["damage_type"])])
+					ok = false
 			"proc_on_kill":
 				ok = _has_fields(e, path, ["chance_percent", "effect", "amount_percent"]) and ok
+				if ok and not ["heal_percent_of_max_hp", "explode_fire"].has(String(e["effect"])):
+					errors.append("%s: proc_on_kill effect must be heal_percent_of_max_hp|explode_fire, got '%s'"
+							% [path, String(e["effect"])])
+					ok = false
 			"convert_damage":
 				ok = _has_fields(e, path, ["from_type", "to_type", "percent"]) and ok
+				if ok:
+					for t in ["from_type", "to_type"]:
+						if not DAMAGE_TYPES.has(String(e[t])):
+							errors.append("%s: convert_damage %s must be a known damage type, got '%s'"
+									% [path, t, String(e[t])])
+							ok = false
 			_:
 				errors.append("%s: unknown effect primitive '%s'" % [path, String(e.get("type", ""))])
 				ok = false

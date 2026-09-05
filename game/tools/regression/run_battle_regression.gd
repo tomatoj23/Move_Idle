@@ -1,5 +1,7 @@
 extends SceneTree
 ## #27 headless regression: content direct-load + stat aggregation + first encounter.
+## #30 headless regression: multi-monster ordering + the four effect primitives
+## (stat_amp / proc_on_hit / proc_on_kill heal+explode chain / convert_damage).
 ## The ONLY seam under test is SessionFacade.run_encounter (spec #24 Testing Decisions);
 ## internal pure functions (aggregation / encounter sim / PRNG) are NOT tested directly.
 ## Run:
@@ -32,6 +34,14 @@ const P1 := {
 const REF_FIRST := {"zone_id": "zone_graveyard_path", "encounter_index": 0}
 const REF_BOSS := {"zone_id": "zone_graveyard_path", "encounter_index": -1}
 
+# Event-stream source labels (#30): explosion kills are labeled by their source in
+# on_kill.killer (the #12 §2.2 "skill carries the source" convention), which makes
+# chain count / aoe target count directly assertable from the closed payload.
+const KILLER_PLAYER := "player"
+const KILLER_EXPLODE := "explode_fire"
+const SKILL_PROC_ON_HIT := "proc_on_hit"
+const SKILL_EXPLODE_FIRE := "explode_fire"
+
 var _passed := 0
 var _failed := 0
 var _failures: Array[String] = []
@@ -63,6 +73,18 @@ func _initialize() -> void:
 	_run_boss(content_root)
 	_section("session state assertions")
 	_run_state_assertions(content_root)
+	_section("multi-monster position order at the count cap")
+	_run_count5_order(tmp)
+	_section("effect primitive: stat_amp")
+	_run_stat_amp(content_root, tmp)
+	_section("effect primitive: proc_on_hit")
+	_run_proc_on_hit(content_root, tmp)
+	_section("effect primitive: proc_on_kill heal")
+	_run_proc_heal(tmp)
+	_section("effect primitive: proc_on_kill explode_fire chain")
+	_run_proc_explode(tmp)
+	_section("effect primitive: convert_damage")
+	_run_convert(content_root)
 
 	_rmtree(tmp)
 	_report()
@@ -133,6 +155,12 @@ func _mini_monster(id: String, stats: Dictionary) -> Dictionary:
 	return {"id": id, "name": id, "stats": stats}
 
 
+## Weapon base shared by #30 mini fixtures (AP bonus is the fixture's damage dial).
+func _mini_blade(ap_bonus: float) -> Dictionary:
+	return {"id": "base_mini_blade", "name": "Mini Blade", "slot": "weapon", "category": "sword",
+			"implicit_mods": [{"attribute": "attack_power", "value": ap_bonus}]}
+
+
 func _mini_zone(zone_monster: String, boss: String, count: int = 1) -> Dictionary:
 	return {
 		"id": "zone_mini", "name": "Mini", "level": 1,
@@ -181,11 +209,33 @@ func _expected_raw(atk: Dictionary, mult: float, dtype: String, crit: bool, targ
 
 ## Re-derives every on_attack in the stream. Monster-side damage reduction is forced
 ## to 0 by design (combat-model #3), which is exactly what the dr fixture asserts.
-func _verify_stream(events: Array, pstats: Dictionary, mstats: Dictionary, label: String) -> void:
+## proc_fx (optional): {"damage_percent": float} of the build's single proc_on_hit
+## effect; proc events are then re-derived as floor(AP x pct% x element coef), no crit.
+## Without proc_fx, proc/explosion events must not appear in the stream.
+func _verify_stream(events: Array, pstats: Dictionary, mstats: Dictionary, label: String,
+		proc_fx: Dictionary = {}) -> void:
 	for e in events:
 		if e["type"] != "on_attack":
 			continue
 		var atk: Dictionary = pstats if e["attacker"] == "player" else mstats
+		if String(e["skill"]) == SKILL_EXPLODE_FIRE:
+			_check(false, "%s explosion events belong to the dedicated cascade section" % label)
+			continue
+		if String(e["skill"]) == SKILL_PROC_ON_HIT:
+			_check(not proc_fx.is_empty(),
+					"%s proc_on_hit event appeared without proc_fx (would be silently unverified)" % label)
+			if proc_fx.is_empty():
+				continue
+			var pct := float(proc_fx.get("damage_percent", 0.0))
+			var coef := 1.0
+			var pel := String(e["element"])
+			if pel != "physical":
+				coef = float(atk.get(pel + "_damage_multiplier", 1.0))
+			var expect_p := maxi(1, floori(float(atk["attack_power"]) * pct / 100.0 * coef))
+			_check(int(e["raw_damage"]) == expect_p and not bool(e["crit"]),
+					"%s proc raw=%d matches floor(AP x %s%% x coef), no crit"
+							% [label, int(e["raw_damage"]), str(pct)])
+			continue
 		var mult := 1.0
 		if GOLD_MULT.has(e["skill"]):
 			mult = float(GOLD_MULT[e["skill"]])
@@ -280,6 +330,15 @@ func _run_content_load(content_root: String, tmp: String) -> void:
 		"zones/zone_mini.json": _mini_zone("mob_x", "mob_x", 6),
 	})
 	_check(ContentDB.load_from_dir(case_dir).errors.size() > 0, "encounter count out of [1,5] -> error")
+
+	case_dir = tmp.path_join("bad_effect_enum")
+	_write_mini_db(case_dir, [_mini_monster("mob_x", ok_stats)], "mob_x", {
+		"affixes/affix_bad_effect.json": {"id": "affix_bad_effect", "name": "Bad Effect",
+				"kind": "legendary",
+				"legendary": {"effects": [{"type": "proc_on_kill", "chance_percent": 10,
+						"effect": "summon_dragon", "amount_percent": 1}]}},
+	})
+	_check(ContentDB.load_from_dir(case_dir).errors.size() > 0, "unknown proc_on_kill effect value -> error")
 
 
 func _run_encounter_win(content_root: String) -> void:
@@ -445,9 +504,7 @@ func _run_player_first(tmp: String) -> void:
 		"max_hp": 40.0, "attack_power": 150.0, "attack_speed": 1.0, "crit_chance": 0.0,
 	})], "mob_fastkill", {
 		# Mini db carries its own base so the fixture does not depend on real content/.
-		"items/base/base_mini_blade.json": {"id": "base_mini_blade", "name": "Mini Blade",
-				"slot": "weapon", "category": "sword",
-				"implicit_mods": [{"attribute": "attack_power", "value": 30.0}]},
+		"items/base/base_mini_blade.json": _mini_blade(30.0),
 	})
 	var db := ContentDB.load_from_dir(case_dir)
 	_check(db.errors.is_empty(), "player_first mini db loads")
@@ -576,3 +633,332 @@ func _run_state_assertions(content_root: String) -> void:
 
 	_check(SessionFacade.run_encounter(base, db, {"zone_id": "zone_graveyard_path", "encounter_index": 3}).has("errors"),
 			"encounter index out of range -> error")
+
+
+# ---------------------------------------------------------------- #30 sections
+
+## AC: 同屏怪数量由内容给定（上限 5 由 ContentDB 把关）、站位序即清单序、
+## first-alive 索敌、无仇恨系统。mini fixture（弱怪 + 一击必杀）专测引擎侧
+## 展开——真实内容 zone 的 count 2/3 已由 win-path 切片覆盖；count-5 的真实
+## 平衡（裸装 1 级打 5 只 8 AP 骷髅必输）不是本票目标，数值曲线归后续票。
+func _run_count5_order(tmp: String) -> void:
+	var case_dir := tmp.path_join("count5")
+	_write_mini_db(case_dir, [_mini_monster("mob_rank", {
+		"max_hp": 40.0, "attack_power": 1.0, "attack_speed": 1.0, "crit_chance": 0.0,
+	})], "mob_rank", {
+		"items/base/base_mini_blade.json": _mini_blade(30.0),
+		"zones/zone_mini.json": _mini_zone("mob_rank", "mob_rank", 5),
+	})
+	var mdb := ContentDB.load_from_dir(case_dir)
+	_check(mdb.errors.is_empty(), "count-5 mini db loads")
+	if not mdb.errors.is_empty():
+		return
+	var state := {"player_level": 1, "equipment": {"weapon": {"base": "base_mini_blade", "affixes": []}}, "skills": []}
+	var r := SessionFacade.run_encounter(state, mdb, {"zone_id": "zone_mini", "encounter_index": 0})
+	_check(not r.has("errors"), "count-5 encounter runs without errors")
+	if r.has("errors"):
+		return
+	_check(r["result"] == "win" and int(r["duration_ticks"]) == 40,
+			"five one-shot kills at the 10-tick cadence -> win at tick 40")
+	var kills: Array = r["events"].filter(func(e): return e["type"] == "on_kill")
+	_check(kills.size() == 5, "five on-screen monsters -> five on_kill events (one per monster)")
+	if kills.size() == 5:
+		var order_ok := true
+		for i in 5:
+			if String(kills[i]["victim"]) != "mob_rank#%d" % (i + 1):
+				order_ok = false
+		_check(order_ok, "kills follow position order #1..#5 (first-alive targeting)")
+	var no_aggro := true
+	for e in r["events"]:
+		if e["type"] == "on_attack" and e["attacker"] != "player" and e["target"] != "player":
+			no_aggro = false
+	_check(no_aggro, "every monster attack targets the player (no aggro system)")
+	var pstats_count5 := {"attack_power": 40.0, "crit_damage": 50.0}
+	_verify_stream(r["events"], pstats_count5, mdb.monsters["mob_rank"]["stats"], "count5")
+
+
+## AC: 属性放大进入聚合链。加算源（铁剑固有 +12）先求和，乘算源（泰坦之力 ×1.3）
+## 乘在总和上：AP 22×1.3 = 28.6 -> 重斩 floor(57.2) = 57（暴击 85）。若乘算先于
+## 加算会得到 10×1.3+12 = 25 -> 50，此断言区分两种次序。狂暴之心 ×1.25 攻速：
+## 间隔 max(1, round(10/1.25)) = 8（1.25 为 2 的负幂，浮点精确）。
+func _run_stat_amp(content_root: String, tmp: String) -> void:
+	var db := _load_db(content_root)
+	if not db.errors.is_empty():
+		return
+	var state_titan := {
+		"player_level": 1,
+		"equipment": {"weapon": {"base": "base_sword_long_iron",
+				"affixes": [{"affix": "affix_legend_titan_might"}]}},
+		"skills": ["skill_heavy_strike"],
+	}
+	var rt := SessionFacade.run_encounter(state_titan, db, REF_FIRST)
+	_check(not rt.has("errors"), "stat_amp (titan might) encounter runs without errors")
+	if rt.has("errors"):
+		for e in rt["errors"]:
+			print(ANCHOR + "   facade error: " + e)
+		return
+	var first: Dictionary = rt["events"][0]
+	if bool(first["crit"]):
+		_check(int(first["raw_damage"]) == 85, "stat_amp: (+12 then x1.3) -> AP 28.6, crit heavy hit 85")
+	else:
+		_check(int(first["raw_damage"]) == 57, "stat_amp: multiply applies to the summed AP (57, not 50)")
+	var pstats_amp := {"attack_power": 28.6, "crit_damage": 50.0}
+	_verify_stream(rt["events"], pstats_amp, db.monsters["mob_skeleton_warrior"]["stats"], "titan")
+
+	var state_berserk := {
+		"player_level": 1,
+		"equipment": {"weapon": {"base": "base_sword_long_iron",
+				"affixes": [{"affix": "affix_legend_berserk_heart"}]}},
+		"skills": ["skill_heavy_strike"],
+	}
+	var rb := SessionFacade.run_encounter(state_berserk, db, REF_FIRST)
+	_check(not rb.has("errors"), "stat_amp (berserk heart) encounter runs without errors")
+	if rb.has("errors"):
+		return
+	var b_attacks: Array = rb["events"].filter(func(e): return e["type"] == "on_attack" and e["attacker"] == "player")
+	var b_expect: int = floori(float(rb["duration_ticks"]) / 8.0) + 1
+	_check(b_attacks.size() == b_expect,
+			"attack_speed x1.25 -> interval 8 (%d hits in %d ticks)"
+					% [b_attacks.size(), int(rb["duration_ticks"])])
+
+	# 显式 operation "add"：走注册表分派（attack_power 为 add 属性）→ 纯求和。
+	# AP 10 + 30 固有 + 5 放大 = 45 -> 普攻 45（暴击 67）。
+	var case_dir := tmp.path_join("stat_amp_add")
+	_write_mini_db(case_dir, [_mini_monster("mob_amp_add", {
+		"max_hp": 40.0, "attack_power": 1.0, "attack_speed": 1.0, "crit_chance": 0.0,
+	})], "mob_amp_add", {
+		"items/base/base_mini_blade.json": _mini_blade(30.0),
+		"affixes/affix_amp_add.json": {"id": "affix_amp_add", "name": "Amp Add",
+				"kind": "legendary",
+				"legendary": {"effects": [{"type": "stat_amp", "attribute": "attack_power",
+						"operation": "add", "value": 5}]}},
+	})
+	var adb := ContentDB.load_from_dir(case_dir)
+	_check(adb.errors.is_empty(), "stat_amp add mini db loads")
+	if adb.errors.is_empty():
+		var state_add := {"player_level": 1, "equipment": {"weapon": {
+				"base": "base_mini_blade", "affixes": [{"affix": "affix_amp_add"}]}}, "skills": []}
+		var ra := SessionFacade.run_encounter(state_add, adb, {"zone_id": "zone_mini", "encounter_index": 0})
+		_check(not ra.has("errors"), "stat_amp add encounter runs without errors")
+		if not ra.has("errors"):
+			var first_add: Dictionary = ra["events"][0]
+			if bool(first_add["crit"]):
+				_check(int(first_add["raw_damage"]) == 67, "stat_amp add: crit basic hit 67")
+			else:
+				_check(int(first_add["raw_damage"]) == 45, "stat_amp add: AP 10+30+5 -> basic hit 45")
+
+
+## AC: 命中触发按概率造成额外伤害。真实词缀腐蚀之触（25%/45% 毒）：proc 伤害
+## = floor(22 x 0.45 x 1.0) = 9，不吃暴击，element = 效果伤害类型，单目标。
+## 另用 100% 触发 fixture 钉死「每次主击命中且目标存活恰好一条 proc」与数值 20。
+func _run_proc_on_hit(content_root: String, tmp: String) -> void:
+	var db := _load_db(content_root)
+	if not db.errors.is_empty():
+		return
+	var state := {
+		"player_level": 1,
+		"equipment": {"weapon": {"base": "base_sword_long_iron",
+				"affixes": [{"affix": "affix_legend_corrode_touch"}]}},
+		"skills": [],
+	}
+	var r := SessionFacade.run_encounter(state, db, REF_FIRST)
+	_check(not r.has("errors"), "legendary affix instance (fixed values, no roll array) resolves")
+	if r.has("errors"):
+		for e in r["errors"]:
+			print(ANCHOR + "   facade error: " + e)
+		return
+	var procs: Array = r["events"].filter(func(e): return e["type"] == "on_attack" and e["skill"] == SKILL_PROC_ON_HIT)
+	_check(procs.size() > 0, "golden seed produced at least one proc_on_hit")
+	var proc_ok := true
+	for e in procs:
+		if int(e["raw_damage"]) != 9 or bool(e["crit"]) or String(e["element"]) != "poison" \
+				or String(e["attacker"]) != "player":
+			proc_ok = false
+	_check(proc_ok, "proc_on_hit: floor(22 x 45%) = 9, no crit, poison, single target")
+	var pstats_proc := {"attack_power": 22.0, "crit_damage": 50.0}
+	_verify_stream(r["events"], pstats_proc, db.monsters["mob_skeleton_warrior"]["stats"],
+			"proc_hit", {"damage_percent": 45.0})
+
+	var case_dir := tmp.path_join("proc_on_hit_full")
+	_write_mini_db(case_dir, [_mini_monster("mob_proc_wall", {
+		"max_hp": 100.0, "attack_power": 5.0, "attack_speed": 1.0, "crit_chance": 0.0,
+	})], "mob_proc_wall", {
+		"items/base/base_mini_blade.json": _mini_blade(30.0),
+		"affixes/affix_mini_ember.json": {"id": "affix_mini_ember", "name": "Mini Ember",
+				"kind": "legendary",
+				"legendary": {"effects": [{"type": "proc_on_hit", "chance_percent": 100,
+						"damage_type": "fire", "damage_percent": 50}]}},
+		"zones/zone_mini.json": _mini_zone("mob_proc_wall", "mob_proc_wall", 2),
+	})
+	var mdb := ContentDB.load_from_dir(case_dir)
+	_check(mdb.errors.is_empty(), "proc_on_hit 100% mini db loads")
+	if not mdb.errors.is_empty():
+		return
+	var mstate := {"player_level": 1, "equipment": {"weapon": {
+			"base": "base_mini_blade", "affixes": [{"affix": "affix_mini_ember"}]}}, "skills": []}
+	var mr := SessionFacade.run_encounter(mstate, mdb, {"zone_id": "zone_mini", "encounter_index": 0})
+	_check(not mr.has("errors"), "proc_on_hit 100% encounter runs without errors")
+	if mr.has("errors"):
+		return
+	# AP 40，怪 100 血：主击 40 不杀 -> proc 20 -> 下一击才杀，两只怪各恰好吃一条 proc。
+	var mprocs: Array = mr["events"].filter(func(e): return e["type"] == "on_attack" and e["skill"] == SKILL_PROC_ON_HIT)
+	_check(mprocs.size() == 2, "100% proc: exactly one per survived main hit (2 procs, 0 after killing blows)")
+	for e in mprocs:
+		_check(int(e["raw_damage"]) == 20 and not bool(e["crit"]) and String(e["element"]) == "fire",
+				"100% proc damage floor(40 x 50%) = 20, no crit, fire")
+	var m_kills: Array = mr["events"].filter(func(e): return e["type"] == "on_kill")
+	_check(m_kills.size() == 2, "100% proc fight still kills both monsters")
+
+
+## AC: proc_on_kill heal。100% 概率回复 100% 最大生命：双怪夹击（2x15/秒），
+## 无词缀玩家在第 3~4 拍必死（任何暴击序列下都输），有词缀每杀一口回满必胜
+## ——结果翻转证明 heal 进入结算；数值留足余量，结论不依赖随机序列。
+func _run_proc_heal(tmp: String) -> void:
+	var case_dir := tmp.path_join("proc_heal")
+	_write_mini_db(case_dir, [_mini_monster("mob_flanker", {
+		"max_hp": 400.0, "attack_power": 15.0, "attack_speed": 1.0, "crit_chance": 0.0,
+	})], "mob_flanker", {
+		"items/base/base_mini_blade.json": _mini_blade(90.0),
+		"affixes/affix_mini_feast.json": {"id": "affix_mini_feast", "name": "Mini Feast",
+				"kind": "legendary",
+				"legendary": {"effects": [{"type": "proc_on_kill", "chance_percent": 100,
+						"effect": "heal_percent_of_max_hp", "amount_percent": 100}]}},
+		"zones/zone_mini.json": _mini_zone("mob_flanker", "mob_flanker", 2),
+	})
+	var mdb := ContentDB.load_from_dir(case_dir)
+	_check(mdb.errors.is_empty(), "proc_heal mini db loads")
+	if not mdb.errors.is_empty():
+		return
+	var bare := {"player_level": 1, "equipment": {"weapon": {"base": "base_mini_blade", "affixes": []}}, "skills": []}
+	var feasted := {"player_level": 1, "equipment": {"weapon": {"base": "base_mini_blade",
+			"affixes": [{"affix": "affix_mini_feast"}]}}, "skills": []}
+	var ref := {"zone_id": "zone_mini", "encounter_index": 0}
+	var r_bare := SessionFacade.run_encounter(bare, mdb, ref)
+	_check(r_bare.get("result") == "lose", "without heal proc the two-monster press kills the player")
+	var r_feast := SessionFacade.run_encounter(feasted, mdb, ref)
+	_check(r_feast.get("result") == "win", "100% heal on kill flips the fight to a win")
+	var kills: Array = r_feast.get("events", []).filter(func(e): return e["type"] == "on_kill")
+	_check(kills.size() == 2, "heal fight still kills both monsters")
+
+
+## AC: proc_on_kill explode_fire + 连锁 + 事件流统计。100% 概率、100% 攻击力火焰
+## 爆炸（AP 40 -> 每目标 40 = 怪满血即秒）：主杀 #1 -> 爆炸杀 #2 -> #2 的死亡
+## 再 roll -> 爆炸杀 #3 -> 清场，tick 0 结束。事件流按精确序列断言；统计口径：
+## 连锁次数 = killer=="explode_fire" 的 on_kill 数（2），群伤目标数 =
+## skill=="explode_fire" 的 on_attack 数（2）。爆炸不吃暴击、元素恒 fire。
+func _run_proc_explode(tmp: String) -> void:
+	var case_dir := tmp.path_join("proc_explode")
+	_write_mini_db(case_dir, [_mini_monster("mob_dry_leaf", {
+		"max_hp": 40.0, "attack_power": 1.0, "attack_speed": 1.0, "crit_chance": 0.0,
+	})], "mob_dry_leaf", {
+		"items/base/base_mini_blade.json": _mini_blade(30.0),
+		"affixes/affix_mini_wake.json": {"id": "affix_mini_wake", "name": "Mini Wake",
+				"kind": "legendary",
+				"legendary": {"effects": [{"type": "proc_on_kill", "chance_percent": 100,
+						"effect": "explode_fire", "amount_percent": 100}]}},
+		"zones/zone_mini.json": _mini_zone("mob_dry_leaf", "mob_dry_leaf", 3),
+	})
+	var mdb := ContentDB.load_from_dir(case_dir)
+	_check(mdb.errors.is_empty(), "proc_explode mini db loads")
+	if not mdb.errors.is_empty():
+		return
+	var state := {"player_level": 1, "equipment": {"weapon": {"base": "base_mini_blade",
+			"affixes": [{"affix": "affix_mini_wake"}]}}, "skills": []}
+	var r := SessionFacade.run_encounter(state, mdb, {"zone_id": "zone_mini", "encounter_index": 0})
+	_check(not r.has("errors"), "proc_explode encounter runs without errors")
+	if r.has("errors"):
+		return
+	_check(r["result"] == "win" and int(r["duration_ticks"]) == 0, "cascade clears the field at tick 0")
+	var events: Array = r["events"]
+	_check(events.size() == 6, "cascade stream is exactly the 6 deterministic events")
+	var expected_seq: Array = [
+		{"type": "on_attack", "attacker": "player", "who": "mob_dry_leaf#1", "skill": "basic_attack", "element": "physical", "killer": "", "victim": ""},
+		{"type": "on_kill", "attacker": "", "who": "", "skill": "", "element": "", "killer": KILLER_PLAYER, "victim": "mob_dry_leaf#1"},
+		{"type": "on_attack", "attacker": "player", "who": "mob_dry_leaf#2", "skill": SKILL_EXPLODE_FIRE, "element": "fire", "killer": "", "victim": ""},
+		{"type": "on_kill", "attacker": "", "who": "", "skill": "", "element": "", "killer": KILLER_EXPLODE, "victim": "mob_dry_leaf#2"},
+		{"type": "on_attack", "attacker": "player", "who": "mob_dry_leaf#3", "skill": SKILL_EXPLODE_FIRE, "element": "fire", "killer": "", "victim": ""},
+		{"type": "on_kill", "attacker": "", "who": "", "skill": "", "element": "", "killer": KILLER_EXPLODE, "victim": "mob_dry_leaf#3"},
+	]
+	for i in mini(events.size(), expected_seq.size()):
+		var e: Dictionary = events[i]
+		var w: Dictionary = expected_seq[i]
+		var target_key := "target" if e.has("target") else "victim"
+		var want_key := "target" if w["type"] == "on_attack" else "victim"
+		_check(String(e["type"]) == String(w["type"])
+				and String(e.get("attacker", "")) == String(w["attacker"])
+				and String(e[target_key]) == String(w[want_key])
+				and String(e.get("skill", "")) == String(w["skill"])
+				and String(e.get("killer", "")) == String(w["killer"])
+				and String(e.get("victim", "")) == String(w["victim"])
+				and String(e.get("element", "")) == String(w["element"]),
+				"cascade event %d matches the expected sequence" % i)
+	for e in events:
+		if e["type"] != "on_attack":
+			continue
+		if String(e["skill"]) == SKILL_EXPLODE_FIRE:
+			_check(int(e["raw_damage"]) == 40 and not bool(e["crit"]),
+					"explosion hit: AP x 100%% fire = 40, no crit")
+		else:
+			_check((int(e["raw_damage"]) == 40 and not bool(e["crit"]))
+					or (int(e["raw_damage"]) == 60 and bool(e["crit"])),
+					"cascade main hit consistent with its crit roll")
+	var chain_kills: Array = events.filter(func(e): return e["type"] == "on_kill" and e["killer"] == KILLER_EXPLODE)
+	var aoe_targets: Array = events.filter(func(e): return e["type"] == "on_attack" and e["skill"] == SKILL_EXPLODE_FIRE)
+	_check(chain_kills.size() == 2, "event-stream stat: chain count (explosion kills) = 2")
+	_check(aoe_targets.size() == 2, "event-stream stat: aoe target count (explosion hits) = 2")
+
+
+## AC: 伤害类型转换进入元素系数。烈焰之心 50% 物理->火 + 之焰 fdm 1.1：
+## 有效系数 = 0.5x1.0 + 0.5x1.1 = 1.05 -> 重斩 floor(44 x 1.05) = 46（暴击 69）；
+## 无转换是 48/72，46 证明转换进了系数。寒霜之魂 100% 物理->冰：物理命中
+## element 报 cold；火弹不受影响（from_type 份额为 0，element 恒 fire）。
+func _run_convert(content_root: String) -> void:
+	var db := _load_db(content_root)
+	if not db.errors.is_empty():
+		return
+	var state := {
+		"player_level": 1,
+		"equipment": {"weapon": {"base": "base_sword_long_iron", "affixes": [
+			{"affix": "affix_legend_flame_heart"},
+			{"affix": "affix_of_fires", "values": [{"attribute": "fire_damage_multiplier", "value": 1.1}]},
+		]}},
+		"skills": ["skill_heavy_strike"],
+	}
+	var r := SessionFacade.run_encounter(state, db, REF_FIRST)
+	_check(not r.has("errors"), "convert (flame heart) encounter runs without errors")
+	if r.has("errors"):
+		return
+	var first: Dictionary = r["events"][0]
+	_check(String(first["skill"]) == "skill_heavy_strike", "convert build opens with heavy strike")
+	if bool(first["crit"]):
+		_check(int(first["raw_damage"]) == 69, "50% phys->fire convert: crit heavy hit 69 (72 unconverted)")
+	else:
+		_check(int(first["raw_damage"]) == 46, "50% phys->fire convert: heavy hit 46 (48 unconverted)")
+
+	var state_cold := {
+		"player_level": 5,
+		"equipment": {"weapon": {"base": "base_sword_long_iron",
+				"affixes": [{"affix": "affix_legend_frost_soul"}]}},
+		"skills": ["skill_fire_bolt"],
+	}
+	var rc := SessionFacade.run_encounter(state_cold, db, REF_FIRST)
+	_check(not rc.has("errors"), "convert (frost soul) encounter runs without errors")
+	if rc.has("errors"):
+		return
+	var basic_ok := true
+	var bolt_ok := true
+	var basic_seen := false
+	var bolt_seen := false
+	for e in rc["events"]:
+		if e["type"] != "on_attack" or e["attacker"] != "player":
+			continue
+		if e["skill"] == "basic_attack":
+			basic_seen = true
+			if String(e["element"]) != "cold":
+				basic_ok = false
+		elif e["skill"] == "skill_fire_bolt":
+			bolt_seen = true
+			if String(e["element"]) != "fire":
+				bolt_ok = false
+	_check(basic_seen and basic_ok, "100% phys->cold convert: basic attacks report element cold")
+	_check(bolt_seen and bolt_ok, "fire bolts keep element fire (conversion only moves the physical share)")

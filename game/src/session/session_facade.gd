@@ -4,6 +4,9 @@ extends RefCounted
 ## 输入 = 存档状态（内存态）+ 内容库 + 遭遇引用；输出 = 结果 + 事件流 + 新状态。
 ## 战斗、聚合、随机性全部藏在私有实现后；事件载荷封闭、零回调。
 ## #27 范围：单场遭遇（encounter_index >= 0 = 普通遭遇下标，-1 = 首领单挑）。
+## #30 增量：传奇词缀实例免 values（效果数值固定于内容，#8 约定）；四效果原语
+## 求值——stat_amp 并入聚合链，proc_on_hit / proc_on_kill / convert_damage 交给
+## EncounterSim（套装阶梯接入后复用同一求值器）。
 ## 进度推进、掉落、离线补算、落盘由后续票接入；new_state 目前为输入状态原样透传
 ## （遭遇内血量是瞬态不入档——「遭遇间玩家回满」由每场从满血起算直接成立，
 ## save-persistence §3 既定）。
@@ -56,6 +59,12 @@ static func run_encounter(state: Dictionary, content_db: ContentDB, ref: Diction
 		resolved_skills.append(rec)
 
 	var equipped: Array = []
+	# 传奇效果收集（#30）：依装备槽序 × 实例词缀序 × 效果清单序展开，供遭遇模拟
+	# 求值。stat_amp 直接并入聚合链；proc/convert 传给 EncounterSim（套装阶梯接入
+	# 后复用同一求值器，set-items 既定）。效果数值固定于内容（#8 约定），实例不携带。
+	var fx_on_hit: Array = []
+	var fx_on_kill: Array = []
+	var fx_convert: Array = []
 	var equipment: Dictionary = state.get("equipment", {})
 	for slot in StatAggregator.EQUIP_SLOTS:
 		var inst = equipment.get(slot)
@@ -77,6 +86,34 @@ static func run_encounter(state: Dictionary, content_db: ContentDB, ref: Diction
 			var arec = content_db.affixes.get(String(aff.get("affix", "")))
 			if arec == null:
 				errors.append("unknown affix id: %s" % str(aff.get("affix", "")))
+				continue
+			if String(arec["kind"]) == "legendary":
+				for e in arec["legendary"].get("effects", []):
+					match String(e["type"]):
+						"stat_amp":
+							entry["affixes"].append({
+								"attribute": String(e["attribute"]),
+								"value": float(e["value"]),
+								"operation": String(e["operation"]),
+							})
+						"proc_on_hit":
+							fx_on_hit.append({
+								"chance_percent": float(e["chance_percent"]),
+								"damage_type": String(e["damage_type"]),
+								"damage_percent": float(e["damage_percent"]),
+							})
+						"proc_on_kill":
+							fx_on_kill.append({
+								"chance_percent": float(e["chance_percent"]),
+								"effect": String(e["effect"]),
+								"amount_percent": float(e["amount_percent"]),
+							})
+						"convert_damage":
+							fx_convert.append({
+								"from_type": String(e["from_type"]),
+								"to_type": String(e["to_type"]),
+								"percent": float(e["percent"]),
+							})
 				continue
 			if not (aff.get("values") is Array):
 				errors.append("affix instance %s needs a values array (per-mod rolled numbers); refusing to silently drop it"
@@ -125,7 +162,11 @@ static func run_encounter(state: Dictionary, content_db: ContentDB, ref: Diction
 	var stats := StatAggregator.aggregate(content_db.attributes, level, equipped)
 	var seed := DeterministicRng.seed_from(_seed_parts(state, zone_id, encounter_index, level))
 	var rng := DeterministicRng.new(seed)
-	var sim := EncounterSim.run({"stats": stats, "skills": resolved_skills}, mons, rng)
+	var sim := EncounterSim.run({
+		"stats": stats,
+		"skills": resolved_skills,
+		"effects": {"on_hit": fx_on_hit, "on_kill": fx_on_kill, "convert": fx_convert},
+	}, mons, rng)
 	if String(sim["result"]) == "stalemate":
 		return {"errors": PackedStringArray([
 			"encounter exceeded the tick budget: content cannot converge (check monster HP vs player damage)",
