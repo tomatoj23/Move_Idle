@@ -4,6 +4,10 @@ extends SceneTree
 ## (stat_amp / proc_on_hit / proc_on_kill heal+explode chain / convert_damage).
 ## #31 headless regression: skill loadout (three slots, cooldown-ready cast in slot
 ## order, unlock level boundary, build-axis difference, new_state passthrough).
+## #32 headless regression: loot three-layer roll (drop gate -> rarity -> instance
+## generation), droptable weights/nesting/family material cap, affix count bands,
+## tier gates and filters, display names, set-piece rarity floor, drop event
+## contract and distribution determinism.
 ## The ONLY seam under test is SessionFacade.run_encounter (spec #24 Testing Decisions);
 ## internal pure functions (aggregation / encounter sim / PRNG) are NOT tested directly.
 ## Run:
@@ -43,6 +47,22 @@ const KILLER_PLAYER := "player"
 const KILLER_EXPLODE := "explode_fire"
 const SKILL_PROC_ON_HIT := "proc_on_hit"
 const SKILL_EXPLODE_FIRE := "explode_fire"
+
+# Closed drop payload (loot-rarity #5: instance summary + the kill it came from).
+const DROP_KEYS: Array[String] = ["instance", "monster", "type"]
+const INSTANCE_KEYS: Array[String] = ["affixes", "base", "ilvl", "name", "rarity"]
+const AFFIX_KEYS: Array[String] = ["affix", "values"]
+const VALUE_KEYS: Array[String] = ["attribute", "value"]
+const RARITIES: Array[String] = ["normal", "magic", "rare", "legendary"]
+
+# Loot fixtures: 1-HP monsters die to the first basic attack, so a run is short
+# and the kill count is an exact input (5 per ordinary encounter).
+const LOOT_STATS := {"max_hp": 1.0, "attack_power": 1.0, "attack_speed": 1.0, "crit_chance": 0.0}
+const REF_LOOT_FIRST := {"zone_id": "zone_mini", "encounter_index": 0}
+const REF_LOOT_BOSS := {"zone_id": "zone_mini", "encounter_index": -1}
+const DROP_RUNS := 240  # distribution sample size (240 kills per sample)
+# material_tier of the droptable-family fixture bases (rolled tier is inferred from it)
+const FAMILY_TIERS := {"base_dt_f1": 1, "base_dt_f2": 2, "base_dt_f3": 3}
 
 var _passed := 0
 var _failed := 0
@@ -91,6 +111,18 @@ func _initialize() -> void:
 	_run_skill_slots(tmp)
 	_section("skill build difference and state passthrough")
 	_run_skill_build_diff(content_root)
+	_section("drop gate: kill is the only loot entry")
+	_run_drop_gate(tmp)
+	_section("drop: rarity distribution and leader legendary multiplier")
+	_run_drop_rarity(tmp)
+	_section("drop: droptable weights, nesting, family material tier cap")
+	_run_drop_droptable(tmp)
+	_section("drop: affix count, tier gates, filters, legendary fixed values")
+	_run_drop_affixes(tmp)
+	_section("drop: display names and set-piece rarity floor")
+	_run_drop_naming(tmp)
+	_section("drop: event contract and determinism")
+	_run_drop_determinism(tmp)
 
 	_rmtree(tmp)
 	_report()
@@ -1157,4 +1189,696 @@ func _has_error(result: Dictionary, needle: String) -> bool:
 	for e in result["errors"]:
 		if String(e).contains(needle):
 			return true
+	return false
+
+
+# ---------------------------------------------------------------- #32 sections
+
+## AC: 击杀是唯一掉落入口；先判掉不掉（普通怪全局概率 / 首领必掉）。
+func _run_drop_gate(tmp: String) -> void:
+	var db := _load_db(_write_loot_db(tmp.path_join("loot_gate"), 1, {}))
+	_check(db.errors.is_empty(), "loot fixture loads with zero errors")
+	if not db.errors.is_empty():
+		return
+
+	var boss := _drop_sample(db, REF_LOOT_BOSS, 60)
+	_check(int(boss["error_runs"]) == 0, "60 boss runs complete without facade errors")
+	_check(int(boss["kills"]) == 60, "boss sample: 60 kills")
+	_check(boss["drops"].size() == 60,
+			"leader always drops: 60 kills -> %d drops" % boss["drops"].size())
+
+	var normal := _drop_sample(db, REF_LOOT_FIRST, DROP_RUNS)
+	_check(int(normal["error_runs"]) == 0, "ordinary runs complete without facade errors")
+	_check(int(normal["kills"]) == 5 * DROP_RUNS,
+			"ordinary sample: %d kills (5 per encounter)" % int(normal["kills"]))
+	_check(normal["drops"].size() > 0, "ordinary monsters do drop (%d of %d kills)"
+			% [normal["drops"].size(), int(normal["kills"])])
+	var rate := float(normal["drops"].size()) / float(normal["kills"])
+	_check(rate > 0.13 and rate < 0.27,
+			"ordinary drop rate %.3f sits on the 0.20 engine constant" % rate)
+
+	# 无掉落表 = 不掉（内容没给渠道就是不掉，绝不是「掉了但没东西」）。
+	var no_dt := _load_db(_write_loot_db(tmp.path_join("loot_no_dt"), 1, {
+			"monsters/mob_loot.json": {"id": "mob_loot", "name": "Loot", "stats": LOOT_STATS},
+			"monsters/mob_loot_boss.json": {"id": "mob_loot_boss", "name": "Loot Boss",
+					"stats": LOOT_STATS},
+	}))
+	var bare := _drop_sample(no_dt, REF_LOOT_FIRST, 10)
+	_check(int(bare["kills"]) == 50, "no-drop-table sample: 50 kills")
+	_check(bare["drops"].size() == 0, "monster without a drop_table never drops")
+	_check(int(bare["error_runs"]) == 0, "a kill without a drop_table is not an error")
+
+	# 玩家倒下的那次 on_kill 不是击杀，不产生掉落。
+	var lethal := _load_db(_write_loot_db(tmp.path_join("loot_player_death"), 1, {
+			"monsters/mob_loot.json": {"id": "mob_loot", "name": "Loot", "drop_table": "dt_loot",
+					"stats": {"max_hp": 1.0, "attack_power": 25.0, "attack_speed": 1.0,
+							"crit_chance": 0.0}},
+	}))
+	var r := SessionFacade.run_encounter({"player_level": 1, "equipment": {}, "skills": []},
+			lethal, REF_LOOT_FIRST)
+	_check(not r.has("errors"), "lethal fixture runs without errors")
+	if r.has("errors"):
+		return
+	_check(String(r["result"]) == "lose", "lethal fixture: the player falls")
+	_check(_kills_of(r["events"], true) == 1, "the player's own death is one on_kill event")
+	_check(_kills_of(r["events"], false) == 1, "one monster died before the player fell")
+	var pdrops := _drops_of(r["events"])
+	var wrong_monster := 0
+	for d in pdrops:
+		if String(d["monster"]) == "player":
+			wrong_monster += 1
+	_check(wrong_monster == 0 and pdrops.size() <= _kills_of(r["events"], false),
+			"no drop is ever attributed to the player's death (%d drops for %d monster kills)"
+					% [pdrops.size(), _kills_of(r["events"], false)])
+
+	# 真实内容冒烟：首领必掉（1 次击杀 = 1 件），普通遭遇 2 杀最多 2 件。
+	var real := _load_db(_resolve_content_root())
+	if real.errors.is_empty():
+		var winning := {"player_level": 1, "equipment": {}, "skills": ["skill_heavy_strike"]}
+		var rb := SessionFacade.run_encounter(winning, real, REF_BOSS)
+		_check(not rb.has("errors"), "real content: boss encounter still runs")
+		if not rb.has("errors"):
+			_check(_kills_of(rb["events"], false) == 1, "real content: boss fight is one kill")
+			_check(_drops_of(rb["events"]).size() == 1,
+					"real content: boss kill -> exactly 1 drop")
+		var rn := SessionFacade.run_encounter(winning, real, REF_FIRST)
+		_check(not rn.has("errors"), "real content: first encounter still runs")
+		if not rn.has("errors"):
+			_check(_kills_of(rn["events"], false) == 2, "real content: 2 skeletons killed")
+			_check(_drops_of(rn["events"]).size() <= 2,
+					"real content: 2 kills -> at most 2 drops")
+
+
+## AC: 稀有度四档按权重 roll；首领对传奇档权重施加倍率加成。
+func _run_drop_rarity(tmp: String) -> void:
+	var db := _load_db(_write_loot_db(tmp.path_join("loot_rarity"), 1, {}))
+	if not db.errors.is_empty():
+		return
+	var boss := _drop_sample(db, REF_LOOT_BOSS, DROP_RUNS)
+	var normal := _drop_sample(db, REF_LOOT_FIRST, DROP_RUNS)
+	_check(int(boss["error_runs"]) == 0 and int(normal["error_runs"]) == 0,
+			"rarity samples run clean")
+	var bc := _rarity_counts(boss["drops"])
+	var nc := _rarity_counts(normal["drops"])
+	_check(boss["drops"].size() == DROP_RUNS, "boss sample: %d drops" % boss["drops"].size())
+	_check(_all_rarities_seen(bc), "all four rarities appear on leader kills")
+	# 首领权重 = 55/32/12/1(传奇 ×10) -> .505/.294/.110/.092
+	_check(_share_in(bc, "normal", 0.505, 0.12),
+			"leader normal share %.3f ~ .505" % _share(bc, "normal"))
+	_check(_share_in(bc, "magic", 0.294, 0.12),
+			"leader magic share %.3f ~ .294" % _share(bc, "magic"))
+	_check(_share_in(bc, "legendary", 0.092, 0.07),
+			"leader legendary share %.3f ~ .092 (legendary weight x10)" % _share(bc, "legendary"))
+	_check(int(bc["normal"]) > int(bc["magic"]) and int(bc["magic"]) > int(bc["rare"]),
+			"leader rarity weights order normal > magic > rare")
+	# 普通怪权重 = 55/32/12/1 -> .55/.32/.12/.01
+	_check(normal["drops"].size() > 60,
+			"ordinary sample collects enough drops (%d)" % normal["drops"].size())
+	_check(_share_in(nc, "normal", 0.55, 0.12),
+			"ordinary normal share %.3f ~ .55" % _share(nc, "normal"))
+	_check(_share_in(nc, "magic", 0.32, 0.12),
+			"ordinary magic share %.3f ~ .32" % _share(nc, "magic"))
+	_check(int(nc["normal"]) > int(nc["magic"]) and int(nc["magic"]) > int(nc["rare"]),
+			"ordinary rarity weights order normal > magic > rare")
+	_check(int(nc["rare"]) > 0, "ordinary kills can roll rare (%d)" % int(nc["rare"]))
+	_check(_share(bc, "legendary") > _share(nc, "legendary"),
+			"leader legendary share %.3f > ordinary %.3f (leader multiplier)"
+					% [_share(bc, "legendary"), _share(nc, "legendary")])
+	_check(int(nc["legendary"]) <= 8, "ordinary legendary stays rare (%d of %d drops)"
+			% [int(nc["legendary"]), normal["drops"].size()])
+
+
+## AC: 掉落表权重 roll、嵌套子表、直接指定基底、按家族 roll；
+## 家族材质在达标上限内均匀 roll。
+func _run_drop_droptable(tmp: String) -> void:
+	var files := {
+			"items/base/base_dt_a.json": _base_rec("base_dt_a", "DT A", "weapon", "sword", 1, ""),
+			"items/base/base_dt_b.json": _base_rec("base_dt_b", "DT B", "weapon", "sword", 1, ""),
+			"items/base/base_dt_f1.json": _base_rec("base_dt_f1", "DT F1", "weapon", "sword", 1, "fam_dt"),
+			"items/base/base_dt_f2.json": _base_rec("base_dt_f2", "DT F2", "weapon", "sword", 2, "fam_dt"),
+			"items/base/base_dt_f3.json": _base_rec("base_dt_f3", "DT F3", "weapon", "sword", 3, "fam_dt"),
+			"droptables/dt_loot.json": {"id": "dt_loot", "entries": [
+					{"type": "droptable", "ref": "dt_sub", "weight": 40},
+					{"type": "base", "ref": "base_dt_b", "weight": 30},
+					{"type": "family", "ref": "fam_dt", "weight": 30}]},
+			"droptables/dt_sub.json": {"id": "dt_sub", "entries": [
+					{"type": "base", "ref": "base_dt_a", "weight": 100}]}}
+	var db := _load_db(_write_loot_db(tmp.path_join("loot_dt"), 25, files))
+	if not db.errors.is_empty():
+		return
+	var sample := _drop_sample(db, REF_LOOT_BOSS, DROP_RUNS)
+	var drops: Array = sample["drops"]
+	_check(int(sample["error_runs"]) == 0, "droptable sample runs clean")
+	_check(drops.size() == DROP_RUNS, "droptable sample: %d drops" % drops.size())
+	var by_base := _base_counts(drops)
+	_check(by_base.has("base_dt_a") and by_base.has("base_dt_b"),
+			"nested subtable and direct base entry both drop")
+	_check(_share_in(by_base, "base_dt_a", 0.40, 0.13),
+			"nested subtable share %.3f ~ .40" % _share(by_base, "base_dt_a"))
+	_check(_share_in(by_base, "base_dt_b", 0.30, 0.13),
+			"direct base share %.3f ~ .30" % _share(by_base, "base_dt_b"))
+	_check(by_base.has("base_dt_f1") and by_base.has("base_dt_f2") and by_base.has("base_dt_f3"),
+			"all three family material tiers drop at ilvl 25")
+	_check(_share_in(by_base, "base_dt_f1", 0.10, 0.08)
+					and _share_in(by_base, "base_dt_f2", 0.10, 0.08)
+					and _share_in(by_base, "base_dt_f3", 0.10, 0.08),
+			"family material tiers roll uniformly (%.3f / %.3f / %.3f ~ .10 each)"
+					% [_share(by_base, "base_dt_f1"), _share(by_base, "base_dt_f2"),
+							_share(by_base, "base_dt_f3")])
+
+	# 材质达标上限：cap = 1 + (ilvl-1)/10 -> ilvl 1 只到 tier 1，ilvl 15 到 tier 2。
+	var low := _drop_sample(_load_db(_write_loot_db(tmp.path_join("loot_dt_low"), 1, files)),
+			REF_LOOT_BOSS, DROP_RUNS)
+	var low_tiers := _family_tier_counts(low["drops"])
+	_check(_dict_total(low_tiers) > 0,
+			"family entry still rolls at ilvl 1 (%d drops)" % _dict_total(low_tiers))
+	_check(low_tiers.size() == 1 and low_tiers.has(1),
+			"ilvl 1 caps family material tier at 1 (only tier-1 members are eligible)")
+	var mid := _drop_sample(_load_db(_write_loot_db(tmp.path_join("loot_dt_mid"), 15, files)),
+			REF_LOOT_BOSS, DROP_RUNS)
+	var mid_tiers := _family_tier_counts(mid["drops"])
+	_check(mid_tiers.size() == 2 and mid_tiers.has(1) and mid_tiers.has(2),
+			"ilvl 15 admits material tiers 1 and 2 only (tier 3 stays behind its cap)")
+
+
+## AC: 稀有度决定词缀数量档次；档位与数值在达标范围内均匀 roll；
+## 与语义过滤（槽位 / 类别 / ilvl 门槛）；同实例不重复词缀；传奇数值固定不 roll。
+func _run_drop_affixes(tmp: String) -> void:
+	var db := _load_db(_write_loot_db(tmp.path_join("loot_affix"), 25, {}))
+	if not db.errors.is_empty():
+		return
+	var sample := _drop_sample(db, REF_LOOT_BOSS, DROP_RUNS)
+	var drops: Array = sample["drops"]
+	_check(int(sample["error_runs"]) == 0, "affix sample runs clean")
+	_check(drops.size() == DROP_RUNS, "affix sample: %d drops" % drops.size())
+
+	var band_bad := 0
+	var dup_bad := 0
+	var legend_bad := 0
+	var value_bad := 0
+	var armor_only := 0
+	var axe_only := 0
+	var future := 0
+	for d in drops:
+		var inst: Dictionary = d["instance"]
+		var affixes: Array = inst["affixes"]
+		var seen := {}
+		var legend_count := 0
+		for a in affixes:
+			var aid := String(a["affix"])
+			if seen.has(aid):
+				dup_bad += 1
+			seen[aid] = true
+			var arec: Dictionary = db.affixes[aid]
+			if String(arec["kind"]) == "legendary":
+				legend_count += 1
+				if (a["values"] as Array).size() != 0:
+					legend_bad += 1
+				continue
+			for v in a["values"]:
+				if not _value_in_eligible_tier(arec, float(v["value"]), int(inst["ilvl"])):
+					value_bad += 1
+			match aid:
+				"affix_d_armor":
+					armor_only += 1
+				"affix_d_axe":
+					axe_only += 1
+				"affix_d_high":
+					future += 1
+		if not _affix_band_ok(String(inst["rarity"]), affixes.size(), legend_count):
+			band_bad += 1
+	_check(band_bad == 0, "affix count follows the rarity band on all %d drops" % drops.size())
+	_check(dup_bad == 0, "no affix repeats inside one instance")
+	_check(legend_bad == 0, "legendary affixes carry no rolled values (numbers fixed in content)")
+	_check(value_bad == 0, "every rolled value sits inside an ilvl-eligible tier range")
+	_check(armor_only == 0, "slot filter: armor-only affix never lands on a weapon")
+	_check(axe_only == 0, "category filter: axe-only affix never lands on a sword")
+	_check(future == 0, "ilvl gate: an affix whose lowest tier needs ilvl 50 never lands at ilvl 25")
+
+	var legends: Array = drops.filter(func(d): return String(d["instance"]["rarity"]) == "legendary")
+	_check(legends.size() > 0, "legendary rarity appears in the sample (%d)" % legends.size())
+	var exactly_one := true
+	var legend_stat := {}
+	for d in legends:
+		var n := 0
+		for a in d["instance"]["affixes"]:
+			if String(db.affixes[String(a["affix"])]["kind"]) == "legendary":
+				n += 1
+		if n != 1:
+			exactly_one = false
+		legend_stat[(d["instance"]["affixes"] as Array).size() - 1] = true
+	_check(exactly_one, "every legendary instance carries exactly one legendary affix")
+	_check(legend_stat.has(2) and legend_stat.has(3),
+			"legendary stat affix count floats across its 2~3 band")
+
+	# 档内浮动：魔法 1~2、稀有 3~4 两侧都要出现（数量在档内均匀，不是钉在一端）
+	var magic_counts := {}
+	var rare_counts := {}
+	for d in drops:
+		var inst: Dictionary = d["instance"]
+		var n := (inst["affixes"] as Array).size()
+		match String(inst["rarity"]):
+			"magic":
+				magic_counts[n] = true
+			"rare":
+				rare_counts[n] = true
+	_check(magic_counts.has(1) and magic_counts.has(2),
+			"magic affix count floats across its 1~2 band")
+	_check(rare_counts.has(3) and rare_counts.has(4),
+			"rare affix count floats across its 3~4 band")
+
+	# 词缀池小于档位需求（护甲槽只配了 2 条）：提前收尾，不报错、不重复、不溢出。
+	var thin_files := _loot_affix_files(["weapon"])
+	thin_files["items/base/base_thin_plate.json"] = _base_rec("base_thin_plate", "Thin Plate",
+			"armor", "plate", 1, "")
+	thin_files["affixes/affix_d_armor2.json"] = _with_filter(_affix_rec("affix_d_armor2",
+			"Bulwark", "prefix", "max_hp", [{"ilvl": 1, "min": 1, "max": 4}]),
+			{"allowed_slots": ["armor"]})
+	thin_files["droptables/dt_loot.json"] = {"id": "dt_loot", "entries": [
+			{"type": "base", "ref": "base_thin_plate", "weight": 100}]}
+	var thin_db := _load_db(_write_loot_db(tmp.path_join("loot_thin"), 25, thin_files))
+	var thin := _drop_sample(thin_db, REF_LOOT_BOSS, 60)
+	_check(int(thin["error_runs"]) == 0, "an affix pool smaller than the count band is not an error")
+	_check(thin["drops"].size() == 60, "thin-pool sample: %d drops" % thin["drops"].size())
+	var thin_bad := 0
+	var thin_capped := 0
+	for d in thin["drops"]:
+		var stat_n := 0
+		var seen := {}
+		for a in d["instance"]["affixes"]:
+			var aid := String(a["affix"])
+			if seen.has(aid):
+				thin_bad += 1
+			seen[aid] = true
+			if String(thin_db.affixes[aid]["kind"]) == "stat":
+				stat_n += 1
+		if stat_n > 2:
+			thin_bad += 1
+		if String(d["instance"]["rarity"]) == "rare" and stat_n == 2:
+			thin_capped += 1
+	_check(thin_bad == 0, "an exhausted pool stops at its size: no repeats, no overflow")
+	_check(thin_capped > 0, "rare drops stop at the 2-affix pool instead of failing (%d)" % thin_capped)
+
+	# 档位门槛：ilvl 1 只吃 ilvl-1 档（区间上界 4），ilvl 25 高档进场（>= 10）。
+	var low := _drop_sample(_load_db(_write_loot_db(tmp.path_join("loot_affix_low"), 1, {})),
+			REF_LOOT_BOSS, DROP_RUNS)
+	_check(_max_value(low["drops"]) <= 4.0,
+			"ilvl 1 never rolls the ilvl-20 tier (max value %.2f)" % _max_value(low["drops"]))
+	var high_rolls := _count_at_least(drops, 10.0)
+	_check(high_rolls > 0, "ilvl 25 lets the high tier into the pool (%d high rolls)" % high_rolls)
+
+
+## AC: 显示名按稀有度规则生成；套装件稀有度低于稀有档钳到稀有档，显示名恒为基底名。
+func _run_drop_naming(tmp: String) -> void:
+	var db := _load_db(_write_loot_db(tmp.path_join("loot_name"), 1, {}))
+	if not db.errors.is_empty():
+		return
+	var drops: Array = _drop_sample(db, REF_LOOT_BOSS, DROP_RUNS)["drops"]
+	_check(drops.size() == DROP_RUNS, "naming sample: %d drops" % drops.size())
+	var counts := _rarity_counts(drops)
+	_check(int(counts["magic"]) > 0 and int(counts["rare"]) > 0,
+			"naming sample covers magic (%d) and rare (%d)" % [int(counts["magic"]), int(counts["rare"])])
+	# 显示名按稀有度规则从实例自身的词缀推出（loot-rarity §4）。
+	var bad := {}
+	for r in RARITIES:
+		bad[r] = 0
+	var two_sided := 0
+	for d in drops:
+		var inst: Dictionary = d["instance"]
+		var rarity := String(inst["rarity"])
+		if String(inst["name"]) != _expected_name(inst, db):
+			bad[rarity] = int(bad[rarity]) + 1
+		if rarity == "rare":
+			var w := _name_words_of(inst, db)
+			if w["prefix"] != "" and w["suffix"] != "":
+				two_sided += 1
+	_check(int(bad["normal"]) == 0, "normal items are named after their base alone")
+	_check(int(bad["magic"]) == 0, "magic items take one affix word into the name (prefix first)")
+	_check(int(bad["rare"]) == 0, "rare items take one prefix and one suffix word")
+	_check(int(bad["legendary"]) == 0, "legendary items are named after their legendary affix")
+	_check(two_sided > 0, "the sample exercises the two-sided rare name (%d rare drops)" % two_sided)
+
+	# 套装件：稀有度下限稀有档 + 显示名恒为专属基底名。
+	var set_files := {
+			"items/base/base_set_ring.json": _base_rec("base_set_ring", "Oath Ring", "trinket", "ring", 1, ""),
+			"sets/set_oath.json": {"id": "set_oath", "name": "Oath",
+					"members": ["base_loot_blade", "base_set_ring"],
+					"tiers": [{"pieces": 2, "effects": [{"type": "stat_amp",
+							"attribute": "attack_power", "operation": "multiply", "value": 1.1}]}]}}
+	var sdb := _load_db(_write_loot_db(tmp.path_join("loot_set"), 1, set_files))
+	if not sdb.errors.is_empty():
+		return
+	var sdrops: Array = _drop_sample(sdb, REF_LOOT_BOSS, DROP_RUNS)["drops"]
+	_check(sdrops.size() == DROP_RUNS, "set-piece sample: %d drops" % sdrops.size())
+	var floor_bad := 0
+	var name_bad := 0
+	for d in sdrops:
+		var inst: Dictionary = d["instance"]
+		if not (String(inst["rarity"]) == "rare" or String(inst["rarity"]) == "legendary"):
+			floor_bad += 1
+		if String(inst["name"]) != String(sdb.item_bases[String(inst["base"])]["name"]):
+			name_bad += 1
+	_check(floor_bad == 0, "set pieces clamp up to rare when the rarity roll lands lower")
+	_check(name_bad == 0, "set pieces keep their exclusive base name (no prefix/suffix composition)")
+
+
+## AC: 掉落事件进入事件流；载荷封闭；固定输入下分布稳定可复现。
+func _run_drop_determinism(tmp: String) -> void:
+	var db := _load_db(_write_loot_db(tmp.path_join("loot_det"), 12, {}))
+	if not db.errors.is_empty():
+		return
+	var state := {"player_level": 7, "equipment": {}, "skills": []}
+	var a := SessionFacade.run_encounter(state, db, REF_LOOT_FIRST)
+	var b := SessionFacade.run_encounter(state, db, REF_LOOT_FIRST)
+	_check(not a.has("errors") and not b.has("errors"), "determinism pair runs without errors")
+	if a.has("errors") or b.has("errors"):
+		return
+	_check(JSON.stringify(a["events"]) == JSON.stringify(b["events"]),
+			"same input -> identical event stream including drops")
+	var drops := _drops_of(a["events"])
+	_check(drops.size() > 0, "determinism sample has drops to inspect (%d)" % drops.size())
+	if drops.is_empty():
+		return
+	for d in drops:
+		_check_closed(d, DROP_KEYS, "drop")
+		var inst: Dictionary = d["instance"]
+		_check_closed(inst, INSTANCE_KEYS, "instance")
+		for af in inst["affixes"]:
+			_check_closed(af, AFFIX_KEYS, "affix instance")
+			for v in af["values"]:
+				_check_closed(v, VALUE_KEYS, "affix value")
+	# ilvl 锚 = 区域等级（难度阶偏移归进度票，本票 ilvl = zone.level）
+	_check(int(drops[0]["instance"]["ilvl"]) == 12, "instance ilvl is the zone level (12)")
+
+	# 事件序：drop 紧跟在产生它的那次 on_kill 之后（击杀是唯一入口）。
+	# on_kill.victim 带站位后缀（mob_x#2），drop.monster 是怪物内容 id。
+	var events: Array = a["events"]
+	var order_bad := 0
+	for i in events.size():
+		if String(events[i]["type"]) != "drop":
+			continue
+		if i == 0 or String(events[i - 1]["type"]) != "on_kill":
+			order_bad += 1
+		elif String(events[i - 1]["victim"]).split("#")[0] != String(events[i]["monster"]):
+			order_bad += 1
+	_check(order_bad == 0, "every drop event directly follows the on_kill that produced it")
+
+	# 分布可复现：两次同输入采样得到同一份稀有度分布
+	var s1 := _rarity_counts(_drop_sample(db, REF_LOOT_FIRST, 20)["drops"])
+	var s2 := _rarity_counts(_drop_sample(db, REF_LOOT_FIRST, 20)["drops"])
+	_check(JSON.stringify(s1) == JSON.stringify(s2), "rarity distribution is reproducible")
+
+	# 一次调用即一场遭遇、不共享随机状态：夹进别的遭遇后重跑，掉落逐字一致
+	# （离线补算就是逐场调用同一入口，同构性由此成立）。
+	var boss_run := SessionFacade.run_encounter(state, db, REF_LOOT_BOSS)
+	_check(not boss_run.has("errors"), "interleaved boss run has no errors")
+	var again := SessionFacade.run_encounter(state, db, REF_LOOT_FIRST)
+	_check(JSON.stringify(again["events"]) == JSON.stringify(a["events"]),
+			"an unrelated encounter in between does not shift the drop rolls")
+
+
+# ---------------------------------------------------------------- #32 helpers
+
+## 掉落 fixture：5 只 1 血弱怪（一击必杀）+ 1 血首领，掉落表直指单基底；
+## 词缀池 3 前缀 / 2 后缀 / 1 任意 + 1 传奇 + 3 条过滤探针（护甲槽 / 斧类别 /
+## ilvl 50 门槛）。files 可覆写任意文件；level = 区域等级 = ilvl 锚。
+func _write_loot_db(root: String, level: int, files: Dictionary) -> String:
+	_write_mini_db(root, [], "mob_loot", {})
+	var all := _loot_affix_files([])
+	var rest := {
+			"monsters/mob_loot.json": {"id": "mob_loot", "name": "Loot", "stats": LOOT_STATS,
+					"drop_table": "dt_loot"},
+			"monsters/mob_loot_boss.json": {"id": "mob_loot_boss", "name": "Loot Boss",
+					"stats": LOOT_STATS, "drop_table": "dt_loot"},
+			"zones/zone_mini.json": {"id": "zone_mini", "name": "Loot", "level": level,
+					"encounters": [{"monster": "mob_loot", "count": 5}],
+					"boss": "mob_loot_boss", "order": 1},
+			"items/base/base_loot_blade.json": _base_rec("base_loot_blade", "Loot Blade",
+					"weapon", "sword", 1, "fam_blade"),
+			"affixes/affix_d_armor.json": _with_filter(_affix_rec("affix_d_armor", "Armored",
+					"prefix", "max_hp", [{"ilvl": 1, "min": 1, "max": 4}]),
+					{"allowed_slots": ["armor"]}),
+			"affixes/affix_d_axe.json": _with_filter(_affix_rec("affix_d_axe", "of Axes",
+					"suffix", "attack_power", [{"ilvl": 1, "min": 1, "max": 2}]),
+					{"allowed_categories": ["axe"]}),
+			"affixes/affix_d_high.json": _affix_rec("affix_d_high", "Far Future", "prefix",
+					"crit_chance", [{"ilvl": 50, "min": 30, "max": 40}]),
+			"affixes/affix_d_leg.json": _legend_rec("affix_d_leg", "Doombringer"),
+			"droptables/dt_loot.json": {"id": "dt_loot", "entries": [
+					{"type": "base", "ref": "base_loot_blade", "weight": 100}]}}
+	for rel in rest:
+		all[rel] = rest[rel]
+	for rel in files:
+		all[rel] = files[rel]
+	for rel in all:
+		_write_json(root.path_join(rel), all[rel])
+	return root
+
+
+## 掉落 fixture 的通用词缀（无槽位 / 类别限制）。slot_filter 非空即把它们整体挪到
+## 指定槽位——thin 切片用它造出「词缀池小于档位需求」的合法内容组合。
+func _loot_affix_files(slot_filter: Array) -> Dictionary:
+	var files := {
+			"affixes/affix_d_pre1.json": _affix_rec("affix_d_pre1", "Keen", "prefix",
+					"attack_power", [{"ilvl": 1, "min": 1, "max": 3},
+							{"ilvl": 20, "min": 10, "max": 20}]),
+			"affixes/affix_d_pre2.json": _affix_rec("affix_d_pre2", "Stout", "prefix",
+					"max_hp", [{"ilvl": 1, "min": 1, "max": 4}]),
+			"affixes/affix_d_pre3.json": _affix_rec("affix_d_pre3", "Lucky", "prefix",
+					"crit_chance", [{"ilvl": 1, "min": 1, "max": 2}]),
+			"affixes/affix_d_suf1.json": _affix_rec("affix_d_suf1", "of Vitality", "suffix",
+					"max_hp", [{"ilvl": 1, "min": 1, "max": 3}]),
+			"affixes/affix_d_suf2.json": _affix_rec("affix_d_suf2", "of Might", "suffix",
+					"attack_power", [{"ilvl": 1, "min": 1, "max": 2}]),
+			"affixes/affix_d_any1.json": _affix_rec("affix_d_any1", "of Stone", "any",
+					"damage_reduction", [{"ilvl": 1, "min": 1, "max": 2}])}
+	if slot_filter.is_empty():
+		return files
+	var filtered := {}
+	for rel in files:
+		filtered[rel] = _with_filter(files[rel], {"allowed_slots": slot_filter})
+	return filtered
+
+
+func _base_rec(id: String, name: String, slot: String, category: String, tier: int,
+		family: String) -> Dictionary:
+	var rec := {"id": id, "name": name, "slot": slot, "category": category,
+			"material_tier": tier}
+	if family != "":
+		rec["family"] = family
+	return rec
+
+
+func _affix_rec(id: String, name: String, position: String, attribute: String,
+		tiers: Array) -> Dictionary:
+	return {"id": id, "name": name, "kind": "stat", "position": position,
+			"mods": [{"attribute": attribute, "tiers": tiers}]}
+
+
+func _legend_rec(id: String, name: String) -> Dictionary:
+	return {"id": id, "name": name, "kind": "legendary",
+			"legendary": {"effects": [{"type": "stat_amp", "attribute": "attack_power",
+					"operation": "multiply", "value": 1.3}]}}
+
+
+func _with_filter(rec: Dictionary, extra: Dictionary) -> Dictionary:
+	for k in extra:
+		rec[k] = extra[k]
+	return rec
+
+
+## 采样 N 场遭遇：等级逐场递增只为换种子（ilvl 只由区域等级决定，
+## progression-structure §6：角色等级不参与 ilvl）。
+func _drop_sample(db: ContentDB, ref: Dictionary, runs: int) -> Dictionary:
+	var drops: Array = []
+	var kills := 0
+	var error_runs := 0
+	for i in runs:
+		var state := {"player_level": 1 + i, "equipment": {}, "skills": []}
+		var r := SessionFacade.run_encounter(state, db, ref)
+		if r.has("errors"):
+			error_runs += 1
+			for e in r["errors"]:
+				print(ANCHOR + "   facade error: " + e)
+			continue
+		kills += _kills_of(r["events"], false)
+		for e in r["events"]:
+			if String(e["type"]) == "drop":
+				drops.append(e)
+	return {"drops": drops, "kills": kills, "error_runs": error_runs}
+
+
+func _drops_of(events: Array) -> Array:
+	var out: Array = events.filter(func(e): return String(e["type"]) == "drop")
+	return out
+
+
+## on_kill 计数：player_deaths = true 数玩家倒下，false 数怪物死亡。
+func _kills_of(events: Array, player_deaths: bool) -> int:
+	var n := 0
+	for e in events:
+		if String(e["type"]) != "on_kill":
+			continue
+		if (String(e["victim"]) == "player") == player_deaths:
+			n += 1
+	return n
+
+
+func _rarity_counts(drops: Array) -> Dictionary:
+	var counts := {}
+	for r in RARITIES:
+		counts[r] = 0
+	for d in drops:
+		var rarity := String(d["instance"]["rarity"])
+		if counts.has(rarity):
+			counts[rarity] = int(counts[rarity]) + 1
+	return counts
+
+
+func _base_counts(drops: Array) -> Dictionary:
+	var counts := {}
+	for d in drops:
+		var bid := String(d["instance"]["base"])
+		counts[bid] = int(counts.get(bid, 0)) + 1
+	return counts
+
+
+## 家族掉落按材质等级计数（base -> material_tier 见 FAMILY_TIERS）。
+func _family_tier_counts(drops: Array) -> Dictionary:
+	var counts := {}
+	for d in drops:
+		var tier := int(FAMILY_TIERS.get(String(d["instance"]["base"]), 0))
+		if tier == 0:
+			continue
+		counts[tier] = int(counts.get(tier, 0)) + 1
+	return counts
+
+
+func _dict_total(counts: Dictionary) -> int:
+	var total := 0
+	for k in counts:
+		total += int(counts[k])
+	return total
+
+
+func _share(counts: Dictionary, key: String) -> float:
+	var total := 0
+	for k in counts:
+		total += int(counts[k])
+	if total == 0:
+		return 0.0
+	return float(counts.get(key, 0)) / float(total)
+
+
+func _share_in(counts: Dictionary, key: String, expected: float, tol: float) -> bool:
+	return absf(_share(counts, key) - expected) <= tol
+
+
+func _all_rarities_seen(counts: Dictionary) -> bool:
+	for r in RARITIES:
+		if int(counts.get(r, 0)) == 0:
+			return false
+	return true
+
+
+## 稀有度 -> 词缀数量档（loot-rarity §2）：普通 0 / 魔法 1~2 / 稀有 3~4 /
+## 传奇 = 1 条传奇 + 2~3 条 stat。
+func _affix_band_ok(rarity: String, total: int, legend: int) -> bool:
+	match rarity:
+		"normal":
+			return total == 0 and legend == 0
+		"magic":
+			return total >= 1 and total <= 2 and legend == 0
+		"rare":
+			return total >= 3 and total <= 4 and legend == 0
+		"legendary":
+			return legend == 1 and (total - 1) >= 2 and (total - 1) <= 3
+	return false
+
+
+## 数值必须落在某条「ilvl 门槛已达标」的档位区间内。
+func _value_in_eligible_tier(arec: Dictionary, value: float, ilvl: int) -> bool:
+	for mod in arec["mods"]:
+		for t in mod["tiers"]:
+			if int(t["ilvl"]) > ilvl:
+				continue
+			if value >= float(t["min"]) - 0.001 and value <= float(t["max"]) + 0.001:
+				return true
+	return false
+
+
+func _max_value(drops: Array) -> float:
+	var top := 0.0
+	for d in drops:
+		for a in d["instance"]["affixes"]:
+			for v in a["values"]:
+				top = maxf(top, float(v["value"]))
+	return top
+
+
+func _count_at_least(drops: Array, threshold: float) -> int:
+	var n := 0
+	for d in drops:
+		for a in d["instance"]["affixes"]:
+			for v in a["values"]:
+				if float(v["value"]) >= threshold:
+					n += 1
+	return n
+
+
+## 实例自身的前后缀用词：按 roll 序各取第一条；position=any 补缺的一侧，
+## 同一条词缀只占一个位置。
+func _name_words_of(inst: Dictionary, db: ContentDB) -> Dictionary:
+	var words := {"prefix": "", "suffix": ""}
+	var any_words: Array = []
+	for a in inst["affixes"]:
+		var rec: Dictionary = db.affixes[String(a["affix"])]
+		if String(rec["kind"]) == "legendary":
+			continue
+		var name := String(rec["name"])
+		match String(rec.get("position", "")):
+			"prefix":
+				if words["prefix"] == "":
+					words["prefix"] = name
+			"suffix":
+				if words["suffix"] == "":
+					words["suffix"] = name
+			_:
+				any_words.append(name)
+	for w in any_words:
+		if words["prefix"] == "":
+			words["prefix"] = w
+		elif words["suffix"] == "":
+			words["suffix"] = w
+	return words
+
+
+## 按稀有度规则从实例自身推出应有显示名（loot-rarity §4 + set-items §3 套装件）。
+func _expected_name(inst: Dictionary, db: ContentDB) -> String:
+	var base_id := String(inst["base"])
+	var base_name := String(db.item_bases[base_id]["name"])
+	if _is_set_member(base_id, db):
+		return base_name
+	var rarity := String(inst["rarity"])
+	if rarity == "legendary":
+		for a in inst["affixes"]:
+			var rec: Dictionary = db.affixes[String(a["affix"])]
+			if String(rec["kind"]) == "legendary":
+				return String(rec["name"])
+		return base_name
+	var words := _name_words_of(inst, db)
+	if rarity == "rare" and words["prefix"] != "" and words["suffix"] != "":
+		return words["prefix"] + "的" + base_name + "之" + words["suffix"]
+	if rarity != "normal" and words["prefix"] != "":
+		return words["prefix"] + "的" + base_name
+	if rarity != "normal" and words["suffix"] != "":
+		return base_name + "之" + words["suffix"]
+	return base_name
+
+
+func _is_set_member(base_id: String, db: ContentDB) -> bool:
+	for sid in db.sets:
+		for m in db.sets[sid]["members"]:
+			if String(m) == base_id:
+				return true
 	return false

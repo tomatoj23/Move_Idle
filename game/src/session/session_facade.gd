@@ -10,7 +10,11 @@ extends RefCounted
 ## #31 增量：技能装配三槽执法（超过三槽 / 同一技能装多槽 = 状态非法报错——
 ## 同 id 多槽共享一份冷却，第二槽是永远放不出的死槽，绝不静默运行）；解锁判定
 ## 纯等级（level >= unlock_level 即可装配，无任何额外系统，build-system #2.3）。
-## 进度推进、掉落、离线补算、落盘由后续票接入；new_state 目前为输入状态原样透传
+## #32 增量：击杀是唯一掉落入口——遭遇模拟结束后按事件流顺序逐条 on_kill 走
+## LootRoller 三层判定链（掉不掉 → 稀有度 → 实例生成），命中即在所属 on_kill
+## 之后追加 drop 事件（在线/离线同规则）；ilvl 锚 = 区域等级（难度阶偏移归进度票，
+## progression-structure §3）。掉落进背包归 #33，本票 new_state 仍原样透传。
+## 进度推进、离线补算、落盘由后续票接入；new_state 目前为输入状态原样透传
 ## （遭遇内血量是瞬态不入档——「遭遇间玩家回满」由每场从满血起算直接成立，
 ## save-persistence §3 既定）。
 ## 确定性：种子从**完整输入**派生（区域、遭遇、等级、技能装配、装备形状）——
@@ -19,6 +23,7 @@ extends RefCounted
 const TICK_MS := 100  # 引擎常量：tick 间隔，集中管理点（#24 引擎常量条款）
 const BOSS_ENCOUNTER := -1  # encounter_index 哨兵：首领固定单挑（multi-monster-encounters #1）
 const SKILL_SLOTS := 3  # 引擎常量：三主动技能槽（build-system #2.2）
+const PLAYER_ID := "player"  # 事件流里的玩家身份（击杀怪物才掉落，玩家倒下不掉）
 
 
 ## 耗时换算：tick 是数值层原生时间单位，表现层 / 统计层需要毫秒时经此换算。
@@ -163,6 +168,7 @@ static func run_encounter(state: Dictionary, content_db: ContentDB, ref: Diction
 				monsters_spec = [encounters[encounter_index]]
 
 	var mons: Array = []
+	var monster_of_display := {}  # 站位 id -> 怪物 id（掉落 roll 要认出死的是哪只怪）
 	for spec in monsters_spec:
 		var mrec = content_db.monsters.get(String(spec["monster"]))
 		if mrec == null:
@@ -172,6 +178,7 @@ static func run_encounter(state: Dictionary, content_db: ContentDB, ref: Diction
 		# 同 id 多怪以 #序号 区分事件身份；站位序 = 展开序（表现层消费）
 		for i in count:
 			var display_id := String(mrec["id"]) if count == 1 else "%s#%d" % [String(mrec["id"]), i + 1]
+			monster_of_display[display_id] = String(mrec["id"])
 			mons.append({"id": display_id, "stats": mrec["stats"]})
 
 	if errors.size() > 0:
@@ -189,9 +196,57 @@ static func run_encounter(state: Dictionary, content_db: ContentDB, ref: Diction
 		return {"errors": PackedStringArray([
 			"encounter exceeded the tick budget: content cannot converge (check monster HP vs player damage)",
 		])}
+	var ilvl := int(zone["level"])  # 掉落 ilvl 锚 = 区域等级（难度阶偏移归进度票）
+	var looted := _with_drops(sim["events"], monster_of_display,
+			encounter_index == BOSS_ENCOUNTER, ilvl, content_db, rng)
+	var drop_errors: PackedStringArray = looted["errors"]
+	if not drop_errors.is_empty():
+		return {"errors": drop_errors}
 	return {
 		"result": String(sim["result"]),
 		"duration_ticks": int(sim["duration_ticks"]),
-		"events": sim["events"],
+		"events": looted["events"],
 		"new_state": state,
 	}
+
+
+## 掉落：逐条 on_kill 走三层判定链（击杀是唯一入口），命中即在它之后追加 drop
+## 事件。首领由遭遇哨兵判定（首领 = 区域收尾遭遇的怪物，progression-structure §2）。
+## drop.monster 是怪物内容 id（on_kill.victim 才是带站位后缀的显示 id）。
+## 载荷 = 实例本体（摘要四条 base/name/rarity/ilvl 都在实例顶层）+ 来源击杀。
+## loot-rarity §5 的「来源遭遇引用」不重复进载荷：一次门面调用即一场遭遇，
+## 遭遇引用由调用方持有（离线补算逐场调用，天然带自己的 ref）。
+static func _with_drops(events: Array, monster_of_display: Dictionary, is_leader: bool,
+		ilvl: int, content_db: ContentDB, rng: DeterministicRng) -> Dictionary:
+	var out: Array = []
+	var errs := PackedStringArray()
+	for e in events:
+		out.append(e)
+		if String(e.get("type", "")) != "on_kill":
+			continue
+		var victim := String(e["victim"])
+		if victim == PLAYER_ID:
+			continue  # 玩家倒下不是击杀，不掉落
+		if not monster_of_display.has(victim):
+			errs.append("drop roll: unknown kill victim '%s'" % victim)
+			continue
+		var monster_id := String(monster_of_display[victim])
+		var mrec = content_db.monsters.get(monster_id)
+		if mrec == null:
+			errs.append("drop roll: unknown monster id '%s'" % monster_id)
+			continue
+		var drop := LootRoller.roll_kill({
+			"ilvl": ilvl,
+			"is_leader": is_leader,
+			"drop_table": String(mrec.get("drop_table", "")),
+			"item_bases": content_db.item_bases,
+			"affixes": content_db.affixes,
+			"droptables": content_db.droptables,
+			"sets": content_db.sets,
+		}, rng)
+		if String(drop["error"]) != "":
+			errs.append("drop roll for %s: %s" % [monster_id, String(drop["error"])])
+			continue
+		if bool(drop["dropped"]):
+			out.append({"type": "drop", "monster": monster_id, "instance": drop["instance"]})
+	return {"events": out, "errors": errs}
