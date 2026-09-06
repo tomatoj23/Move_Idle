@@ -32,6 +32,14 @@ extends RefCounted
 ## roll）→ 主击后目标存活时依效果序每条 proc_on_hit 一次 chance roll → 每次死亡
 ## 依效果序每条 proc_on_kill 一次 chance roll。爆炸对每个目标不再单独 roll（伤害即定）。
 ## 输入 / 输出全是语言内建容器；随机性只经 DeterministicRng 注入。
+##
+## 切片与续跑（#33）：budget_ticks = 本次调用最多推进的 tick 数（相对值，< 0 =
+## 打完为止）。预算耗尽且胜负未分时返回 result = "in_progress"，附带 resume
+## 快照（绝对 tick、玩家当前血量、双方相位、技能冷却、RNG 状态）——瞬态数据，
+## 只活在内存里，不入档（save-persistence §3）。续跑时传入 resume：状态原样
+## 恢复（玩家血量只按新 max_hp 下钳，不加血——回满只发生在遭遇间），统计层用
+## 新 StatTable 求值 = 「下一 tick 起按新属性结算」（换装/升级即时生效）。
+## 战斗进度（怪血、相位、冷却）与 RNG 流跨切片连续：切片边界不扰动任何结果。
 
 const MAX_TICKS := 100000  # 引擎常量：tick 预算；超出 = 内容不可收敛，上层必须报错
 const BASIC_ATTACK_ID := "basic_attack"
@@ -48,27 +56,61 @@ const SKILL_EXPLODE_FIRE := "explode_fire"  # 爆炸伤害事件的 skill 来源
 ##           "effects": {"on_hit": [...], "on_kill": [...], "convert": [...]}}
 ##   效果清单元素 = 门面归一化后的原语载荷（schema 字段，数值已转 float）。
 ## monsters = [{"id": String, "stats": StatTable}, ...]（站位序）
-## 返回 {"result": "win"|"lose"|"stalemate", "duration_ticks": int, "events": Array}
-static func run(player: Dictionary, monsters: Array, rng: DeterministicRng) -> Dictionary:
+## resume = 上一次 in_progress 返回的快照子集：{"tick", "player_hp", "pnext",
+##   "mons": [{"hp", "next"}...], "cooldown": {skill_id -> tick}}（{} = 全新开打；
+##   由门面校验后传入，怪物清单必须与 monsters 一一对应）。
+## 返回 {"result": "win"|"lose"|"stalemate"|"in_progress", "duration_ticks": int,
+##   "events": Array}，in_progress 另带 "resume" 快照。
+static func run(player: Dictionary, monsters: Array, rng: DeterministicRng,
+		budget_ticks: int = -1, resume: Dictionary = {}) -> Dictionary:
 	var fx: Dictionary = player.get("effects", {})
 	var events: Array = []
+	var max_hp := float(player["stats"]["max_hp"])
 	var pstate := {
 		"id": "player",
 		"stats": player["stats"],
-		"hp": float(player["stats"]["max_hp"]),
+		"hp": max_hp,
 	}
 	var mons: Array = []
-	for m in monsters:
-		mons.append({
-			"id": String(m["id"]),
-			"stats": m["stats"],
-			"hp": float(m["stats"]["max_hp"]),
-			"next": 0,
-		})
 	var pnext := 0
 	var cooldown := {}  # skill_id -> 冷却好时的 tick
 	var tick := 0
+	if not resume.is_empty():
+		tick = int(resume["tick"])
+		# 玩家血量原样恢复，只按（换装后可能变化上限的）max_hp 下钳；不加血。
+		pstate["hp"] = minf(float(resume["player_hp"]), max_hp)
+		pnext = int(resume["pnext"])
+		var rmons: Array = resume["mons"]
+		for i in monsters.size():
+			var m = monsters[i]
+			var rh: Dictionary = rmons[i]
+			mons.append({
+				"id": String(m["id"]),
+				"stats": m["stats"],
+				"hp": float(rh["hp"]),
+				"next": int(rh["next"]),
+			})
+		var rcd: Dictionary = resume["cooldown"]
+		for sid in rcd:
+			cooldown[sid] = int(rcd[sid])
+	else:
+		for m in monsters:
+			mons.append({
+				"id": String(m["id"]),
+				"stats": m["stats"],
+				"hp": float(m["stats"]["max_hp"]),
+				"next": 0,
+			})
+	var budget_end := tick + budget_ticks  # budget_ticks < 0 时永不到达
 	while true:
+		# 预算门：只在「未定胜负且预算耗尽」时挂起；本 tick 内已分胜负则照常收尾
+		if budget_ticks >= 0 and tick >= budget_end:
+			return {
+				"result": "in_progress",
+				"duration_ticks": tick,
+				"events": events,
+				"resume": _snapshot(tick, pstate, pnext, mons, cooldown, rng),
+			}
 		# 同 tick 多个单位到点：先玩家（multi-monster-encounters #2.1 确定性顺序）
 		if pstate["hp"] > 0.0 and pnext <= tick:
 			pnext = tick + _interval(pstate["stats"])
@@ -96,6 +138,23 @@ static func run(player: Dictionary, monsters: Array, rng: DeterministicRng) -> D
 	# Unreachable (every loop path returns); satisfies the 4.7 static "all paths
 	# return" rule for while-true loops.
 	return {"result": "lose", "duration_ticks": tick, "events": events}
+
+
+## in_progress 快照：战斗进度（绝对 tick、双方相位、冷却、血量）+ RNG 状态。
+## 全部是瞬态值，仅供下一次切片调用恢复，不入档。
+static func _snapshot(tick: int, pstate: Dictionary, pnext: int, mons: Array,
+		cooldown: Dictionary, rng: DeterministicRng) -> Dictionary:
+	var mons_snap: Array = []
+	for m in mons:
+		mons_snap.append({"hp": float(m["hp"]), "next": int(m["next"])})
+	return {
+		"tick": tick,
+		"player_hp": float(pstate["hp"]),
+		"pnext": pnext,
+		"mons": mons_snap,
+		"cooldown": cooldown.duplicate(),
+		"rng_state": rng.get_state(),
+	}
 
 
 ## 攻击间隔：interval_ticks = max(1, round(10 / attack_speed))（combat-model #1）。

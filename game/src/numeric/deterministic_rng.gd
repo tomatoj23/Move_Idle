@@ -36,3 +36,8 @@ func _init(seed_value: int = 0) -> void:
 func next_float() -> float:
 	_state = (_state * _LCG_A + _LCG_C) & _MASK
 	return float(_state >> 8) / _FLOAT_SCALE
+
+
+## 当前 LCG 状态快照（遭遇切片续跑用）：喂回 _init 即从本时刻继续同一随机序列。
+func get_state() -> int:
+	return _state

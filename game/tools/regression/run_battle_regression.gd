@@ -8,6 +8,11 @@ extends SceneTree
 ## generation), droptable weights/nesting/family material cap, affix count bands,
 ## tier gates and filters, display names, set-piece rarity floor, drop event
 ## contract and distribution determinism.
+## #33 headless regression: inventory auto-pickup into new_state, uncapped
+## append-only bank, equip/unequip three-slot ops (replace returns the old piece,
+## skill loadout untouched, offline snapshot replay), query_stats panel data,
+## mid-encounter equipment swap via slice/resume (remaining ticks re-aggregated,
+## monster HP / cooldowns / RNG carried, drops banked at completion).
 ## The ONLY seam under test is SessionFacade.run_encounter (spec #24 Testing Decisions);
 ## internal pure functions (aggregation / encounter sim / PRNG) are NOT tested directly.
 ## Run:
@@ -125,6 +130,16 @@ func _initialize() -> void:
 	_run_drop_wearable(tmp)
 	_section("drop: event contract and determinism")
 	_run_drop_determinism(tmp)
+	_section("inventory: drops auto-collect into state (#33)")
+	_run_inventory_autopickup(tmp)
+	_section("inventory: uncapped, append-only, battle-invisible")
+	_run_inventory_growth(tmp)
+	_section("equip / unequip: three slots, replace returns old to inventory")
+	_run_equip_ops(tmp)
+	_section("query_stats: panel data through the facade")
+	_run_query_stats(content_root)
+	_section("mid-encounter swap: slice, resume, re-aggregate")
+	_run_mid_encounter_swap(tmp)
 
 	_rmtree(tmp)
 	_report()
@@ -2037,3 +2052,554 @@ func _is_set_member(base_id: String, db: ContentDB) -> bool:
 			if String(m) == base_id:
 				return true
 	return false
+
+
+# ---------------------------------------------------------------- #33 sections
+
+## AC: 掉落事件发生即进入背包（自动拾取，无拾取动作、无地面物品）；输入状态永不被
+## 改动——离线逐场重放拿的同一份快照由此成立。
+func _run_inventory_autopickup(tmp: String) -> void:
+	var db := _load_db(_write_loot_db(tmp.path_join("inv_auto"), 1, {}))
+	_check(db.errors.is_empty(), "auto-pickup fixture loads clean")
+	if not db.errors.is_empty():
+		return
+	# 无 inventory 键的状态：drop 落进新建的 new_state.inventory，顺序即事件序。
+	var state := {"player_level": 1, "equipment": {}, "skills": []}
+	var before := JSON.stringify(state)
+	var r := SessionFacade.run_encounter(state, db, REF_LOOT_BOSS)
+	_check(not r.has("errors"), "auto-pickup: boss run completes without errors")
+	if r.has("errors"):
+		return
+	var drops := _drops_of(r["events"])
+	_check(drops.size() == 1, "auto-pickup: the boss run produced exactly 1 drop")
+	var ns: Dictionary = r["new_state"]
+	_check(ns.has("inventory"), "new_state carries an inventory array (shape normalized)")
+	var inv: Array = ns["inventory"]
+	_check(inv.size() == drops.size(),
+			"every drop event is banked (%d drops -> %d entries)" % [drops.size(), inv.size()])
+	_check(JSON.stringify(inv) == JSON.stringify([drops[0]["instance"]]),
+			"the banked entry is the exact drop instance, in event order")
+	_check(JSON.stringify(state) == before,
+			"run_encounter never mutates the input state (the offline snapshot stays intact)")
+
+	# 预置背包：掉落追加在既有条目之后（入包序），既有条目原样保留。
+	var marker := {"base": "base_loot_blade", "rarity": "normal", "ilvl": 1,
+			"name": "Marker", "affixes": []}
+	var state2 := {"player_level": 1, "equipment": {}, "skills": [], "inventory": [marker]}
+	var r2 := SessionFacade.run_encounter(state2, db, REF_LOOT_BOSS)
+	_check(not r2.has("errors"), "auto-pickup: run with a pre-populated inventory is clean")
+	if not r2.has("errors"):
+		var inv2: Array = r2["new_state"]["inventory"]
+		_check(inv2.size() == 1 + drops.size(),
+				"drops append after existing entries (%d entries)" % inv2.size())
+		_check(JSON.stringify(inv2[0]) == JSON.stringify(marker),
+				"the pre-existing entry is untouched at index 0")
+		_check(JSON.stringify(inv2[1]) == JSON.stringify(drops[0]["instance"]),
+				"the new drop lands right after the old entries")
+
+	# 败场同样入包：玩家倒下前击杀的怪照常掉落、照常入包（同规则，无成败分叉）。
+	var lethal := _load_db(_write_loot_db(tmp.path_join("inv_lethal"), 1, {
+			"monsters/mob_loot.json": {"id": "mob_loot", "name": "Loot",
+					"drop_table": "dt_loot",
+					"stats": {"max_hp": 1.0, "attack_power": 25.0, "attack_speed": 1.0,
+							"crit_chance": 0.0}},
+	}))
+	var rl := SessionFacade.run_encounter({"player_level": 1, "equipment": {}, "skills": []},
+			lethal, REF_LOOT_FIRST)
+	_check(not rl.has("errors"), "auto-pickup: the losing run completes without errors")
+	if not rl.has("errors"):
+		_check(String(rl["result"]) == "lose", "auto-pickup: the losing run loses")
+		var linv: Array = rl["new_state"]["inventory"]
+		_check(linv.size() == _drops_of(rl["events"]).size(),
+				"a losing run banks whatever its kills dropped (%d entries)" % linv.size())
+
+
+## AC: 背包无上限、永不自动清理/合并/去重；背包不进种子部件，掉落入包不扰动战斗。
+func _run_inventory_growth(tmp: String) -> void:
+	var db := _load_db(_write_loot_db(tmp.path_join("inv_grow"), 1, {}))
+	_check(db.errors.is_empty(), "growth fixture loads clean")
+	if not db.errors.is_empty():
+		return
+	var state := {"player_level": 1, "equipment": {}, "skills": []}
+	var first_drop := {}
+	for i in 12:
+		var r := SessionFacade.run_encounter(state, db, REF_LOOT_BOSS)
+		_check(not r.has("errors"), "growth: boss run %d is clean" % (i + 1))
+		if r.has("errors"):
+			return
+		var drops := _drops_of(r["events"])
+		_check(drops.size() == 1, "growth: run %d banks exactly the leader drop" % (i + 1))
+		if i == 0:
+			first_drop = drops[0]
+		state = r["new_state"]
+	var inv: Array = state["inventory"]
+	_check(inv.size() == 12, "12 boss runs -> 12 banked items: nothing trimmed or capped")
+	_check(JSON.stringify(inv[0]) == JSON.stringify(first_drop["instance"]),
+			"the first banked item is still first (append-only, no reordering)")
+
+	# 相同属性的装备不去重、不合并：两个逐字节相同的实例 = 两行。
+	var twin := {"base": "base_loot_blade", "rarity": "normal", "ilvl": 1,
+			"name": "Twin", "affixes": []}
+	var twins := SessionFacade.run_encounter({"player_level": 1, "equipment": {},
+			"skills": [], "inventory": [twin, twin]}, db, REF_LOOT_BOSS)
+	_check(not twins.has("errors"), "growth: the twin-rows run is clean")
+	if not twins.has("errors"):
+		var tinv: Array = twins["new_state"]["inventory"]
+		_check(tinv.size() == 3 and JSON.stringify(tinv[0]) == JSON.stringify(tinv[1]),
+				"identical instances stay as separate rows (no dedup, no merge)")
+
+	# 背包不进种子：同 build 同遭遇，背包厚薄不改变事件流（掉落不扰动后续 rng）。
+	var bare := SessionFacade.run_encounter({"player_level": 1, "equipment": {}, "skills": []},
+			db, REF_LOOT_FIRST)
+	var padded := SessionFacade.run_encounter({"player_level": 1, "equipment": {}, "skills": [],
+			"inventory": inv}, db, REF_LOOT_FIRST)
+	_check(not bare.has("errors") and not padded.has("errors"),
+			"growth: battle-invisibility pair runs clean")
+	if not bare.has("errors") and not padded.has("errors"):
+		_check(JSON.stringify(bare["events"]) == JSON.stringify(padded["events"]),
+				"inventory content never perturbs the battle (not a seed part)")
+		_check((padded["new_state"]["inventory"] as Array).size()
+				== 12 + _drops_of(padded["events"]).size(),
+				"banking adds exactly the new drops to the carried inventory")
+
+
+## AC: 三槽各一件；替换 = 一次调用完成、旧件无损回包尾；卸下即回包；换装不动技能
+## 装配；在线换装不改写快照（离线逐场重放逐字一致）。
+func _run_equip_ops(tmp: String) -> void:
+	var files := {
+			"items/base/base_loot_plate.json": _base_rec("base_loot_plate", "Loot Plate",
+					"armor", "plate", 1, ""),
+			"items/base/base_loot_charm.json": _base_rec("base_loot_charm", "Loot Charm",
+					"trinket", "ring", 1, ""),
+			"skills/skill_loot_bash.json": {"id": "skill_loot_bash", "name": "Bash",
+					"multiplier": 2.0, "cooldown_ticks": 10, "damage_type": "physical",
+					"unlock_level": 1}}
+	var db := _load_db(_write_loot_db(tmp.path_join("inv_equip"), 1, files))
+	_check(db.errors.is_empty(), "equip-ops fixture loads clean")
+	if not db.errors.is_empty():
+		return
+	var blade := {"base": "base_loot_blade", "rarity": "normal", "ilvl": 1,
+			"name": "Loot Blade", "affixes": []}
+	var blade2 := {"base": "base_loot_blade", "rarity": "normal", "ilvl": 1,
+			"name": "Loot Blade 2", "affixes": []}
+	var plate := {"base": "base_loot_plate", "rarity": "normal", "ilvl": 1,
+			"name": "Loot Plate", "affixes": []}
+	var charm := {"base": "base_loot_charm", "rarity": "normal", "ilvl": 1,
+			"name": "Loot Charm", "affixes": []}
+	var state := {"player_level": 1, "equipment": {}, "skills": ["skill_loot_bash"],
+			"inventory": [blade, blade2, plate, charm]}
+	var before := JSON.stringify(state)
+
+	# 空槽穿上：背包少一件、槽里是它；输入状态原样。
+	var e1 := SessionFacade.equip(state, db, 0, "weapon")
+	_check(not e1.has("errors"), "equip: wearing from an empty slot works")
+	if e1.has("errors"):
+		for e in e1["errors"]:
+			print(ANCHOR + "   equip error: " + e)
+		return
+	var s1: Dictionary = e1["state"]
+	_check(JSON.stringify(s1["equipment"]["weapon"]) == JSON.stringify(blade),
+			"equip: the picked instance is worn in the target slot")
+	_check(JSON.stringify(s1["inventory"]) == JSON.stringify([blade2, plate, charm]),
+			"equip: the worn instance leaves the inventory")
+	_check(JSON.stringify(state) == before, "equip: the input state is never mutated")
+
+	# 同槽替换 = 一次调用：新件上身、旧件无损回包尾，没有「先卸下腾位」的中间态。
+	var e2 := SessionFacade.equip(s1, db, 0, "weapon")
+	_check(not e2.has("errors"), "replace: the same-slot swap completes in one call")
+	if e2.has("errors"):
+		return
+	var s2: Dictionary = e2["state"]
+	_check(JSON.stringify(s2["equipment"]["weapon"]) == JSON.stringify(blade2),
+			"replace: the new piece is worn")
+	_check(JSON.stringify(s2["inventory"]) == JSON.stringify([plate, charm, blade]),
+			"replace: the old piece returns to the inventory tail, unharmed")
+
+	# 卸下即回包尾，槽位清空。
+	var u1 := SessionFacade.unequip(s2, "weapon")
+	_check(not u1.has("errors"), "unequip: a worn piece returns to the inventory")
+	if u1.has("errors"):
+		return
+	var su: Dictionary = u1["state"]
+	_check(su["equipment"]["weapon"] == null, "unequip: the slot is left empty")
+	_check(JSON.stringify(su["inventory"]) == JSON.stringify([plate, charm, blade, blade2]),
+			"unequip: the piece is appended at the inventory tail")
+
+	# 三槽同时各一件；技能装配轴原样。
+	var e3 := SessionFacade.equip(su, db, 0, "armor")
+	_check(not e3.has("errors"), "equip: armor wears cleanly")
+	if e3.has("errors"):
+		return
+	var e4 := SessionFacade.equip(e3["state"], db, 0, "trinket")
+	_check(not e4.has("errors"), "equip: trinket wears cleanly")
+	if e4.has("errors"):
+		return
+	var s4: Dictionary = e4["state"]
+	_check(String(db.item_bases[String(s4["equipment"]["armor"]["base"])]["slot"]) == "armor"
+			and String(db.item_bases[String(s4["equipment"]["trinket"]["base"])]["slot"]) == "trinket",
+			"three slots each hold their own piece at once")
+	_check(JSON.stringify(s4["skills"]) == JSON.stringify(["skill_loot_bash"]),
+			"equip never touches the skill loadout (two loadout axes stay separate)")
+
+	# 拒绝路径：非法操作绝不静默，报错点名原因。
+	_check(_has_error(SessionFacade.unequip(s1, "armor"), "empty"),
+			"unequip on an empty slot is an error naming the slot")
+	_check(_has_error(SessionFacade.equip(state, db, 99, "weapon"), "out of range"),
+			"equip: inventory index out of range -> error")
+	_check(_has_error(SessionFacade.equip(state, db, -1, "weapon"), "out of range"),
+			"equip: negative index -> error")
+	_check(_has_error(SessionFacade.equip(state, db, 0, "armor"), "cannot go into slot"),
+			"equip: a weapon base is refused by the armor slot")
+	_check(_has_error(SessionFacade.equip(state, db, 0, "ring"), "unknown equipment slot"),
+			"equip: an unknown slot name is an error")
+	_check(_has_error(SessionFacade.equip({"player_level": 1, "equipment": {}}, db, 0, "weapon"),
+			"out of range"), "equip without an inventory array is an error")
+
+	# 换装不改快照：同一份状态在换装前后逐场重放，事件流逐字一致（离线快照语义）。
+	var r1 := SessionFacade.run_encounter(s4, db, REF_LOOT_FIRST)
+	_check(not r1.has("errors"), "snapshot replay: the battle with three worn pieces runs")
+	if not r1.has("errors"):
+		_check(String(r1["events"][0]["skill"]) == "skill_loot_bash",
+				"the untouched skill loadout still casts after all the swaps")
+		var s4_before := JSON.stringify(s4)
+		var swap := SessionFacade.equip(s4, db, 0, "weapon")
+		_check(not swap.has("errors"), "snapshot replay: the online swap op succeeds")
+		if swap.has("errors"):
+			return
+		var r2 := SessionFacade.run_encounter(s4, db, REF_LOOT_FIRST)
+		_check(not r2.has("errors"), "snapshot replay: the replay run is clean")
+		if r2.has("errors"):
+			return
+		_check(JSON.stringify(r2["events"]) == JSON.stringify(r1["events"]),
+				"replaying the untouched snapshot gives the identical stream after the swap")
+		_check(JSON.stringify(s4) == s4_before,
+				"the swap op and the battles never rewrote the snapshot")
+
+	# 无 equipment 键的状态照样可穿（门面归一化，不要求调用方预建形状）。
+	var eb := SessionFacade.equip({"player_level": 1, "inventory": [blade]}, db, 0, "weapon")
+	_check(not eb.has("errors")
+			and String(eb["state"]["equipment"]["weapon"]["base"]) == "base_loot_blade",
+			"equip normalizes a state without an equipment map")
+
+
+## AC: 聚合属性面板数据可由会话门面查询，随换装即时变化；面板与战斗同一条
+## 校验与聚合路径（同一份数字既进面板也进战斗）。
+func _run_query_stats(content_root: String) -> void:
+	var db := _load_db(content_root)
+	_check(db.errors.is_empty(), "query_stats fixture loads clean")
+	if not db.errors.is_empty():
+		return
+	var q0 := SessionFacade.query_stats({"player_level": 1, "equipment": {}, "skills": []}, db)
+	_check(not q0.has("errors"), "query_stats: a bare state queries without errors")
+	if q0.has("errors"):
+		for e in q0["errors"]:
+			print(ANCHOR + "   query error: " + e)
+		return
+	var stats: Dictionary = q0["stats"]
+	_check(float(stats["max_hp"]) == 100.0 and float(stats["attack_power"]) == 10.0,
+			"panel: the level-1 curve baseline (hp 100, AP 10)")
+	_check(float(stats["crit_chance"]) == 5.0 and float(stats["crit_damage"]) == 50.0,
+			"panel: crit baseline 5/50 comes from the curve")
+	_check(not stats.has("fire_damage_multiplier"),
+			"panel: multiply attributes appear only when sourced")
+
+	var sword := {"base": "base_sword_long_iron", "affixes": []}
+	var plate := {"base": "base_magma_plate", "affixes": []}
+	var charm := {"base": "base_magma_signet", "affixes": []}
+	var packed := {"player_level": 1, "equipment": {}, "skills": [],
+			"inventory": [sword, plate, charm]}
+	var q_pre := SessionFacade.query_stats(packed, db)
+	_check(not q_pre.has("errors") and float(q_pre["stats"]["attack_power"]) == 10.0,
+			"panel: banked-but-unworn gear does not count")
+	var e1 := SessionFacade.equip(packed, db, 0, "weapon")
+	_check(not e1.has("errors"), "panel: the sword equips cleanly")
+	if e1.has("errors"):
+		return
+	var q1 := SessionFacade.query_stats(e1["state"], db)
+	_check(not q1.has("errors") and float(q1["stats"]["attack_power"]) == 22.0,
+			"panel: wearing the sword lifts AP 10 -> 22 immediately (re-aggregation)")
+	var e2 := SessionFacade.equip(e1["state"], db, 0, "armor")
+	_check(not e2.has("errors"), "panel: armor equips cleanly")
+	if e2.has("errors"):
+		return
+	var e3 := SessionFacade.equip(e2["state"], db, 0, "trinket")
+	_check(not e3.has("errors"), "panel: trinket equips cleanly")
+	if e3.has("errors"):
+		return
+	var q_all := SessionFacade.query_stats(e3["state"], db)
+	_check(not q_all.has("errors") and float(q_all["stats"]["damage_reduction"]) == 5.0,
+			"panel: the armor implicit shows up in the same table")
+	_check(float(q_all["stats"]["crit_chance"]) == 8.0,
+			"panel: the trinket implicit stacks on the curve (5 + 3)")
+	_check(float(q_all["stats"]["attack_power"]) == 22.0,
+			"panel: all three slots aggregate into one table at once")
+
+	# 面板与战斗同源：用面板数字重推导整场事件流的每一次命中。
+	var battle := {"player_level": 1,
+			"equipment": {"weapon": {"base": "base_sword_long_iron", "affixes": []}},
+			"skills": ["skill_heavy_strike"]}
+	var qb := SessionFacade.query_stats(battle, db)
+	var rb := SessionFacade.run_encounter(battle, db, REF_FIRST)
+	_check(not qb.has("errors") and not rb.has("errors"),
+			"panel: the same state queries and battles without errors")
+	if not qb.has("errors") and not rb.has("errors"):
+		_verify_stream(rb["events"], qb["stats"],
+				db.monsters["mob_skeleton_warrior"]["stats"], "panel_battle")
+
+	# 传奇 stat_amp 进面板：两阶段先加后乘 (10 + 12) x 1.3 = 28.6。
+	var titan := {"player_level": 1, "equipment": {"weapon": {"base": "base_sword_long_iron",
+			"affixes": [{"affix": "affix_legend_titan_might", "values": []}]}}, "skills": []}
+	var qt := SessionFacade.query_stats(titan, db)
+	_check(not qt.has("errors"), "query_stats: the legendary build queries without errors")
+	if not qt.has("errors"):
+		_check(absf(float(qt["stats"]["attack_power"]) - 28.6) < 0.0001,
+				"panel: stat_amp lands as (10 + 12) x 1.3 = 28.6, two-phase")
+
+	# 非法状态拒绝：面板与战斗同一执法，绝不静默给数字。
+	var illegal := {"player_level": 1,
+			"equipment": {"armor": {"base": "base_sword_long_iron", "affixes": []}},
+			"skills": []}
+	_check(_has_error(SessionFacade.query_stats(illegal, db), "cannot go into slot"),
+			"query_stats refuses an illegal state with the same rule as battle")
+	_check(_has_error(SessionFacade.query_stats({"player_level": 0, "equipment": {},
+			"skills": []}, db), "player_level"), "query_stats refuses level 0")
+
+
+## AC: 任意时刻可换装，触发即时重聚合，下一 tick 起按新属性结算；进行中的遭遇
+## 不中断，怪血量与战斗进度（相位/冷却/玩家已受伤）跨切片不变；换装不改技能
+## 节奏；切片/续跑即在线循环推进一场遭遇的原语。
+## 黄金推导（10 AP、A 每 20 tick 30 伤、普攻 10、无暴击）：#1 于 t90 倒下、
+## #2 于 t190 倒下；预算 125 的切片停在 #2 已被打 70 伤处；换上 90 AP 斧后
+## 剩余部分 t130 普攻 100、t140 重斩 300 收尾，比不换快 50 tick。
+func _run_mid_encounter_swap(tmp: String) -> void:
+	var case_dir := tmp.path_join("mid_swap")
+	_write_mini_db(case_dir, [], "mob_hp200", {
+		"monsters/mob_hp200.json": {"id": "mob_hp200", "name": "HP Bag",
+				"stats": {"max_hp": 200.0, "attack_power": 1.0, "attack_speed": 1.0,
+						"crit_chance": 0.0}},
+		"monsters/mob_ap6.json": {"id": "mob_ap6", "name": "AP Bag",
+				"stats": {"max_hp": 200.0, "attack_power": 6.0, "attack_speed": 1.0,
+						"crit_chance": 0.0}},
+		"zones/zone_mini.json": {"id": "zone_mini", "name": "Mini", "level": 1,
+				"encounters": [{"monster": "mob_hp200", "count": 2},
+						{"monster": "mob_ap6", "count": 2}],
+				"boss": "mob_ap6", "order": 1},
+		"items/base/base_mini_blade.json": _mini_blade(0.0),
+		"items/base/base_mini_axe.json": {"id": "base_mini_axe", "name": "Mini Axe",
+				"slot": "weapon", "category": "axe",
+				"implicit_mods": [{"attribute": "attack_power", "value": 90.0}]},
+		"affixes/affix_mini_steady.json": {"id": "affix_mini_steady", "name": "Mini Steady",
+				"kind": "legendary",
+				"legendary": {"effects": [{"type": "stat_amp", "attribute": "crit_chance",
+						"operation": "add", "value": -5}]}},
+		"skills/skill_mini_a.json": {"id": "skill_mini_a", "name": "A", "multiplier": 3.0,
+				"cooldown_ticks": 20, "damage_type": "physical", "unlock_level": 1},
+	})
+	var mdb := ContentDB.load_from_dir(case_dir)
+	_check(mdb.errors.is_empty(), "mid-swap mini db loads")
+	if not mdb.errors.is_empty():
+		return
+	var steady := [{"affix": "affix_mini_steady", "values": []}]
+	var blade0 := {"base": "base_mini_blade", "rarity": "normal", "ilvl": 1,
+			"name": "Mini Blade", "affixes": steady}
+	var axe := {"base": "base_mini_axe", "rarity": "normal", "ilvl": 1,
+			"name": "Mini Axe", "affixes": steady}
+	var ref := {"zone_id": "zone_mini", "encounter_index": 0}
+	# s_bare = 裸状态；s_inv = 同 build 但背包里带着那把斧（两者事件流必须一致）。
+	var s_bare := {"player_level": 1, "equipment": {"weapon": blade0},
+			"skills": ["skill_mini_a"], "inventory": []}
+	var s_inv := {"player_level": 1, "equipment": {"weapon": blade0},
+			"skills": ["skill_mini_a"], "inventory": [axe]}
+
+	# 切片透明性：不带换装的切片+续跑必须逐字复现不打断的整场。
+	var full := SessionFacade.run_encounter(s_bare, mdb, ref)
+	_check(not full.has("errors"), "mid-swap: the uninterrupted fight runs")
+	if full.has("errors"):
+		return
+	_check(String(full["result"]) == "win" and int(full["duration_ticks"]) == 190,
+			"golden cadence: the 2x200 HP fight ends at tick 190")
+	var s1 := SessionFacade.run_encounter(s_bare, mdb, ref, 125)
+	_check(not s1.has("errors"), "slice: the budgeted call runs without errors")
+	if s1.has("errors"):
+		return
+	_check(String(s1["result"]) == "in_progress", "slice: a budgeted call reports in_progress")
+	_check(int(s1["duration_ticks"]) == 125, "slice: 125 budgeted ticks are consumed exactly")
+	_check(not s1.has("new_state"),
+			"an in-progress slice carries no new_state (in-encounter transient never persists)")
+	if not s1.has("resume"):
+		_check(false, "slice: an in_progress result carries a resume handle")
+		return
+	var s1events: Array = s1["events"]
+	_check(JSON.stringify(s1events)
+			== JSON.stringify((full["events"] as Array).slice(0, s1events.size())),
+			"slice: the partial stream is an exact prefix of the uninterrupted stream")
+	_check(_hits_on(s1events, "mob_hp200#2") == 3 and _damage_to(s1events, "mob_hp200#2") == 70,
+			"slice: the second monster is mid-beating at the boundary (3 hits, 70 damage)")
+	var s2 := SessionFacade.run_encounter(s_bare, mdb, ref, -1, s1["resume"])
+	_check(not s2.has("errors"), "resume: the resumed call runs without errors")
+	if s2.has("errors"):
+		return
+	_check(String(s2["result"]) == "win" and int(s2["duration_ticks"]) == 190,
+			"resume: the fight finishes exactly where the uninterrupted one did")
+	_check(JSON.stringify(s2["events"]) == JSON.stringify(full["events"]),
+			"resume: cooldowns, phases and the RNG stream carry across the boundary")
+
+	# 相对预算 + 三段切片；0 预算 = 挂起而不推进一 tick。
+	var smid := SessionFacade.run_encounter(s_bare, mdb, ref, 20, s1["resume"])
+	_check(not smid.has("errors"), "resume: the middle slice runs without errors")
+	if smid.has("errors"):
+		return
+	_check(String(smid["result"]) == "in_progress" and int(smid["duration_ticks"]) == 145,
+			"resume budget is relative to the slice (125 + 20 = 145)")
+	if not smid.has("resume"):
+		_check(false, "resume: the second slice carries a handle too")
+		return
+	var sfin := SessionFacade.run_encounter(s_bare, mdb, ref, -1, smid["resume"])
+	_check(not sfin.has("errors"), "resume: the final slice runs without errors")
+	if sfin.has("errors"):
+		return
+	_check(JSON.stringify(sfin["events"]) == JSON.stringify(full["events"]),
+			"resume: three slices land on the identical stream")
+	var s_arm := SessionFacade.run_encounter(s_bare, mdb, ref, 0)
+	_check(not s_arm.has("errors"), "slice: the zero-budget call runs without errors")
+	if s_arm.has("errors"):
+		return
+	_check(String(s_arm["result"]) == "in_progress" and (s_arm["events"] as Array).is_empty(),
+			"a zero budget arms the fight without advancing a tick")
+	if not s_arm.has("resume"):
+		_check(false, "slice: the zero-budget slice carries a handle")
+		return
+	var s_arm_fin := SessionFacade.run_encounter(s_bare, mdb, ref, -1, s_arm["resume"])
+	_check(not s_arm_fin.has("errors"), "resume: the armed fight finishes without errors")
+	if s_arm_fin.has("errors"):
+		return
+	_check(JSON.stringify(s_arm_fin["events"]) == JSON.stringify(full["events"]),
+			"resuming from tick 0 still lands on the identical stream")
+
+	# 玩家已受伤同样跨切片携带（边界回满会把死亡时刻从 t80 推迟到更晚）。
+	var ref6 := {"zone_id": "zone_mini", "encounter_index": 1}
+	var full6 := SessionFacade.run_encounter(s_bare, mdb, ref6)
+	_check(not full6.has("errors"), "the AP-6 fight runs without errors")
+	if full6.has("errors"):
+		return
+	_check(String(full6["result"]) == "lose" and int(full6["duration_ticks"]) == 80,
+			"the AP-6 pair kills the player at tick 80 (golden)")
+	var s6 := SessionFacade.run_encounter(s_bare, mdb, ref6, 50)
+	_check(not s6.has("errors"), "slice: the losing-fight slice runs without errors")
+	if s6.has("errors"):
+		return
+	if not s6.has("resume"):
+		_check(false, "slice: the losing-fight slice carries a handle")
+		return
+	var s6b := SessionFacade.run_encounter(s_bare, mdb, ref6, -1, s6["resume"])
+	_check(not s6b.has("errors"), "resume: the losing fight finishes without errors")
+	if s6b.has("errors"):
+		return
+	_check(String(s6b["result"]) == "lose" and int(s6b["duration_ticks"]) == 80,
+			"resume: the player's taken damage carries too")
+
+	# 中途换装：边界前逐字同流（背包不进种子），边界后按新属性重聚合结算。
+	var s1_inv := SessionFacade.run_encounter(s_inv, mdb, ref, 125)
+	_check(not s1_inv.has("errors"), "slice: the padded-state slice runs without errors")
+	if s1_inv.has("errors"):
+		return
+	_check(JSON.stringify(s1_inv["events"]) == JSON.stringify(s1["events"]),
+			"inventory content does not perturb even a partial stream (not a seed part)")
+	var swap := SessionFacade.equip(s_inv, mdb, 0, "weapon")
+	_check(not swap.has("errors"), "mid-swap: the online equip op succeeds mid-fight")
+	if swap.has("errors"):
+		return
+	var s2_swap := SessionFacade.run_encounter(swap["state"], mdb, ref, -1, s1_inv["resume"])
+	_check(not s2_swap.has("errors"), "swap: the resumed fight runs without errors")
+	if s2_swap.has("errors"):
+		return
+	_check(String(s2_swap["result"]) == "win" and int(s2_swap["duration_ticks"]) == 140,
+			"swap: the remainder is fought with the new weapon and ends at tick 140 (was 190)")
+	var boundary: int = (s1_inv["events"] as Array).size()
+	_check(JSON.stringify((s2_swap["events"] as Array).slice(0, boundary))
+			== JSON.stringify(s1["events"]),
+			"swap: the pre-boundary history is carried verbatim")
+	var post: Array = (s2_swap["events"] as Array).slice(boundary)
+	_check(_player_seq(post) == ["basic_attack", "skill_mini_a"],
+			"swap: post-boundary actions keep the skill cadence (basic, then A on cooldown)")
+	_check(_player_raws(post) == [100, 300],
+			"swap: every post-boundary hit uses the new AP (basic 100, A 300)")
+	var total := _damage_to(s2_swap["events"], "mob_hp200#2")
+	_check(total == 470 and total - 300 < 200,
+			"swap: monster HP carries (70 pre + 100 + 300; 170 < 200 before the last hit)")
+
+	# 句柄执法：残缺句柄与跨遭遇句柄一律拒绝，绝不静默续跑错场。
+	_check(_has_error(SessionFacade.run_encounter(s_bare, mdb, ref, -1, {"tick": 125}),
+			"missing key"), "a partial resume handle is refused, never silently restarted")
+	var cross := SessionFacade.run_encounter(s_bare, mdb,
+			{"zone_id": "zone_mini", "encounter_index": 1}, -1, s1["resume"])
+	_check(_has_error(cross, "does not match"),
+			"a handle from another encounter is refused (monster list changed)")
+
+	# 掉落在遭遇完结时统一补 roll：先期切片的击杀在完结时补上 drop 并入包，
+	# 事件语义位置仍紧跟各自的 on_kill。
+	var ldb := _load_db(_write_loot_db(tmp.path_join("mid_loot"), 1, {}))
+	_check(ldb.errors.is_empty(), "mid-swap loot fixture loads clean")
+	if not ldb.errors.is_empty():
+		return
+	var ls := {"player_level": 1, "equipment": {}, "skills": []}
+	var l1 := SessionFacade.run_encounter(ls, ldb, REF_LOOT_FIRST, 10)
+	_check(not l1.has("errors"), "slice: the loot slice runs without errors")
+	if l1.has("errors"):
+		return
+	_check(String(l1["result"]) == "in_progress" and _kills_of(l1["events"], false) == 1,
+			"slice: the first one-HP monster dies inside the budget")
+	_check(_drops_of(l1["events"]).is_empty(),
+			"drop rolls wait for the encounter to complete (no drops mid-fight)")
+	if not l1.has("resume"):
+		_check(false, "slice: the loot slice carries a handle")
+		return
+	var l2 := SessionFacade.run_encounter(ls, ldb, REF_LOOT_FIRST, -1, l1["resume"])
+	_check(not l2.has("errors"), "slice: the banked loot run finishes cleanly")
+	if l2.has("errors"):
+		return
+	_check(String(l2["result"]) == "win", "slice: the banked loot run wins")
+	var order_bad := 0
+	for i in (l2["events"] as Array).size():
+		var e: Dictionary = l2["events"][i]
+		if String(e["type"]) != "drop":
+			continue
+		if i == 0 or String(l2["events"][i - 1]["type"]) != "on_kill":
+			order_bad += 1
+	_check(order_bad == 0,
+			"completed slices still insert every drop right after its own on_kill")
+	_check((l2["new_state"]["inventory"] as Array).size() == _drops_of(l2["events"]).size(),
+			"drops from earlier slices bank at completion (%d entries)"
+					% (l2["new_state"]["inventory"] as Array).size())
+
+
+func _damage_to(events: Array, victim: String) -> int:
+	var total := 0
+	for e in events:
+		if String(e["type"]) == "on_attack" and String(e["target"]) == victim:
+			total += int(e["raw_damage"])
+	return total
+
+
+func _hits_on(events: Array, victim: String) -> int:
+	var n := 0
+	for e in events:
+		if String(e["type"]) == "on_attack" and String(e["target"]) == victim:
+			n += 1
+	return n
+
+
+func _player_seq(events: Array) -> Array:
+	var seq: Array = []
+	for e in events:
+		if String(e["type"]) == "on_attack" and String(e["attacker"]) == "player":
+			seq.append(String(e["skill"]))
+	return seq
+
+
+func _player_raws(events: Array) -> Array:
+	var raws: Array = []
+	for e in events:
+		if String(e["type"]) == "on_attack" and String(e["attacker"]) == "player":
+			raws.append(int(e["raw_damage"]))
+	return raws

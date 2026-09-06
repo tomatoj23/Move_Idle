@@ -13,17 +13,31 @@ extends RefCounted
 ## #32 增量：击杀是唯一掉落入口——遭遇模拟结束后按事件流顺序逐条 on_kill 走
 ## LootRoller 三层判定链（掉不掉 → 稀有度 → 实例生成），命中即在所属 on_kill
 ## 之后追加 drop 事件（在线/离线同规则）；ilvl 锚 = 区域等级（难度阶偏移归进度票，
-## progression-structure §3）。掉落进背包归 #33，本票 new_state 仍原样透传。
-## 进度推进、离线补算、落盘由后续票接入；new_state 目前为输入状态原样透传
-## （遭遇内血量是瞬态不入档——「遭遇间玩家回满」由每场从满血起算直接成立，
-## save-persistence §3 既定）。
+## progression-structure §3）。
+## #33 增量：背包进状态（inventory = 装备实例数组，入包序，无上限、只进不出，
+## CONTEXT「背包」）。掉落 roll 时机沿用 #32 裁量（遭遇完结后统一补 roll），完结时
+## 把全部 drop 实例按流序入包随 new_state 返回——「掉落事件发生即入包」
+## （CONTEXT「自动拾取」），在线/离线同规则。换装三操作：equip（背包下标 + 槽位，
+## 同槽一对一替换、旧件无损回包尾）/ unequip（穿戴位回包尾）——纯状态操作，永不
+## 触碰技能装配（build 的两条装配轴互不影响）。「任意时刻换装、下一 tick 起按
+## 新属性结算」由 run_encounter 的切片参数落实：budget_ticks 限本次推进的 tick 数，
+## 未完场返回 in_progress + 续跑句柄（瞬态不入档，save-persistence §3），下一次
+## 调用按传入的新状态重新聚合——怪血量、相位、技能冷却与 RNG 流跨切片连续，
+## 当前遭遇不中断。query_stats = 聚合属性面板数据，与战斗共用同一条状态校验与
+## 聚合路径（面板与战斗同源；编辑器「装备试算面板」同函数异端，inventory-equipment
+## §4）。排序与筛选是纯表现层，本层不提供也不感知。进度推进、离线补算、落盘由
+## 后续票接入；遭遇内血量瞬态不入档——「遭遇间玩家回满」由每场从满血起算直接成立。
 ## 确定性：种子从**完整输入**派生（区域、遭遇、等级、技能装配、装备形状）——
-## 同输入必得同事件流；同关同级不同 build 不共享随机序列。
+## 同输入必得同事件流；同关同级不同 build 不共享随机序列。背包不在种子部件里
+## （掉落入包不扰动后续战斗）。
 
 const TICK_MS := 100  # 引擎常量：tick 间隔，集中管理点（#24 引擎常量条款）
 const BOSS_ENCOUNTER := -1  # encounter_index 哨兵：首领固定单挑（multi-monster-encounters #1）
 const SKILL_SLOTS := 3  # 引擎常量：三主动技能槽（build-system #2.2）
 const PLAYER_ID := "player"  # 事件流里的玩家身份（击杀怪物才掉落，玩家倒下不掉）
+# 续跑句柄的必需键（模拟快照 5 键 + 门面附件 3 键）；_check_resume 据此执法。
+const RESUME_KEYS: Array[String] = ["tick", "player_hp", "pnext", "mons", "cooldown",
+	"rng_state", "events", "monster_ids"]
 
 
 ## 耗时换算：tick 是数值层原生时间单位，表现层 / 统计层需要毫秒时经此换算。
@@ -44,13 +58,163 @@ static func _seed_parts(state: Dictionary, zone_id: String, encounter_index: int
 	]
 
 
-## state = {"player_level": int, "equipment": {slot -> 实例 | null}, "skills": [skill_id, ...]}
+## state = {"player_level": int, "equipment": {slot -> 实例 | null}, "skills": [skill_id, ...],
+##          "inventory": [装备实例, ...]（可选；缺失视为空包）}
 ##   实例 = {"base": base_id, "affixes": [{"affix": id, "values": [{"attribute", "value"}...]}]}
-##   （词缀实例按 mod 携带已定数值——#27 不做实例 roll，实例生成归掉落/背包票）
+##   （词缀实例按 mod 携带已定数值；传奇词缀免 values，#8 约定。）
 ## ref   = {"zone_id": String, "encounter_index": int（>= 0 普通，-1 首领）}
-## 成功  = {"result": "win"|"lose", "duration_ticks": int, "events": Array, "new_state": Dictionary}
-## 失败  = {"errors": PackedStringArray}（内容或状态非法，绝不静默给结果）
-static func run_encounter(state: Dictionary, content_db: ContentDB, ref: Dictionary) -> Dictionary:
+## budget_ticks = 本次调用最多推进的 tick 数（相对值；< 0 = 打完整场）。
+## resume = 上一次 in_progress 返回的续跑句柄（{} = 全新开打）。
+## 完结返回 = {"result": "win"|"lose", "duration_ticks": int, "events": Array,
+##   "new_state": Dictionary}；切片返回 = {"result": "in_progress", "duration_ticks": int,
+##   "events": Array（累计）, "resume": Dictionary}；
+## 失败  = {"errors": PackedStringArray}（内容或状态非法，绝不静默给结果）。
+static func run_encounter(state: Dictionary, content_db: ContentDB, ref: Dictionary,
+		budget_ticks: int = -1, resume: Dictionary = {}) -> Dictionary:
+	var prep := _prepare(state, content_db, ref)
+	if prep["errors"].size() > 0:
+		return {"errors": prep["errors"]}
+	var stats := StatAggregator.aggregate(content_db.attributes, prep["level"], prep["equipped"])
+	var rng: DeterministicRng
+	var sim_resume: Dictionary = {}
+	if resume.is_empty():
+		rng = DeterministicRng.new(DeterministicRng.seed_from(
+				_seed_parts(state, prep["zone_id"], prep["encounter_index"], prep["level"])))
+	else:
+		var handle_errors := _check_resume(resume, prep["mons"])
+		if handle_errors.size() > 0:
+			return {"errors": handle_errors}
+		sim_resume = {
+			"tick": int(resume["tick"]),
+			"player_hp": float(resume["player_hp"]),
+			"pnext": int(resume["pnext"]),
+			"mons": resume["mons"],
+			"cooldown": resume["cooldown"],
+		}
+		rng = DeterministicRng.new(int(resume["rng_state"]))
+	var sim := EncounterSim.run({
+		"stats": stats,
+		"skills": prep["resolved_skills"],
+		"effects": prep["fx"],
+	}, prep["mons"], rng, budget_ticks, sim_resume)
+	if String(sim["result"]) == "stalemate":
+		return {"errors": PackedStringArray([
+			"encounter exceeded the tick budget: content cannot converge (check monster HP vs player damage)",
+		])}
+	if String(sim["result"]) == "in_progress":
+		var cum: Array = sim["events"]
+		if not resume.is_empty():
+			cum = (resume["events"] as Array) + cum
+		return {
+			"result": "in_progress",
+			"duration_ticks": int(sim["duration_ticks"]),
+			"events": cum,
+			"resume": _resume_handle(sim["resume"], cum, prep["mons"]),
+		}
+	var events: Array = sim["events"]
+	if not resume.is_empty():
+		# 切片完结：合并此前各切片的累计流，drop 事件要插回各自 on_kill 之后。
+		events = (resume["events"] as Array) + events
+	var looted := _with_drops(events, prep["monster_of_display"], prep["is_leader"],
+			int(prep["ilvl"]), content_db, rng)
+	var drop_errors: PackedStringArray = looted["errors"]
+	if not drop_errors.is_empty():
+		return {"errors": drop_errors}
+	var banked: Array = []
+	for e in looted["events"]:
+		if String(e.get("type", "")) == "drop":
+			banked.append(e["instance"])
+	return {
+		"result": String(sim["result"]),
+		"duration_ticks": int(sim["duration_ticks"]),
+		"events": looted["events"],
+		"new_state": _state_with_drops_banked(state, banked),
+	}
+
+
+## AC3：穿上背包第 inventory_index 件到 slot。同槽一对一替换：新件上身、旧件
+## 无损回包尾（回包时刻序），一次调用完成、没有「先卸下腾位」的中间态。纯状态
+## 操作：不改写输入状态、不触碰技能装配。返回前用 _validate_state 复检**整个结果
+## 状态**——equip 拒绝制造任何战斗/面板都拒绝的非法状态（含穿入件自身的词缀/
+## 属性引用），不会出现「穿上后打不了」的死锁；输入状态本身非法时同样拒绝并点名。
+static func equip(state: Dictionary, content_db: ContentDB, inventory_index: int,
+		slot: String) -> Dictionary:
+	var errors := PackedStringArray()
+	if not StatAggregator.EQUIP_SLOTS.has(slot):
+		errors.append("unknown equipment slot: %s" % slot)
+	var inventory: Array = []
+	if state.get("inventory") is Array:
+		inventory = state["inventory"]
+	else:
+		errors.append("state has no inventory array to equip from")
+	var idx := int(inventory_index)
+	if idx < 0 or idx >= inventory.size():
+		errors.append("inventory index out of range: %d" % idx)
+	var inst: Dictionary = {}
+	if errors.is_empty():
+		var candidate = inventory[idx]
+		if not (candidate is Dictionary):
+			errors.append("inventory item %d is not an instance object" % idx)
+		else:
+			inst = candidate
+			var base_rec = content_db.item_bases.get(String(inst.get("base", "")))
+			if base_rec == null:
+				errors.append("unknown base id: %s" % str(inst.get("base", "")))
+			elif String(base_rec["slot"]) != slot:
+				errors.append("base %s (slot %s) cannot go into slot %s"
+						% [String(base_rec["id"]), String(base_rec["slot"]), slot])
+	if errors.size() > 0:
+		return {"errors": errors}
+	var next_state: Dictionary = state.duplicate_deep(Resource.DeepDuplicateMode.DEEP_DUPLICATE_ALL)
+	var worn = (next_state["inventory"] as Array).pop_at(idx)
+	# equipment 表缺失即建（与战斗路径对缺 equipment 的宽容一致——不是要求调用方预建形状）
+	if not (next_state.get("equipment") is Dictionary):
+		next_state["equipment"] = {}
+	var previous = next_state["equipment"].get(slot)
+	next_state["equipment"][slot] = worn
+	if previous != null:
+		(next_state["inventory"] as Array).append(previous)
+	var check := _validate_state(next_state, content_db)
+	if check["errors"].size() > 0:
+		return {"errors": check["errors"]}
+	return {"state": next_state}
+
+
+## AC3：卸下 = 穿戴位实例移回背包尾（背包无上限，永远放得下）；空槽卸下是调用方
+## bug，报错而非静默成功。不做 _validate_state 复检——unequip 是从非法状态里
+## 逃出来的通道（比如外部改档穿进了坏实例），不能反过来把它堵死。
+static func unequip(state: Dictionary, slot: String) -> Dictionary:
+	var errors := PackedStringArray()
+	if not StatAggregator.EQUIP_SLOTS.has(slot):
+		errors.append("unknown equipment slot: %s" % slot)
+	if errors.is_empty() and (not (state.get("equipment") is Dictionary)
+			or state["equipment"].get(slot) == null):
+		errors.append("equipment slot %s is empty" % slot)
+	if errors.size() > 0:
+		return {"errors": errors}
+	var next_state: Dictionary = state.duplicate_deep(Resource.DeepDuplicateMode.DEEP_DUPLICATE_ALL)
+	var worn = next_state["equipment"].get(slot)
+	next_state["equipment"][slot] = null
+	# inventory 缺失即建：卸下时背包必然放得下，形状归一化由门面负责
+	if not (next_state.get("inventory") is Array):
+		next_state["inventory"] = []
+	(next_state["inventory"] as Array).append(worn)
+	return {"state": next_state}
+
+
+## AC6：聚合属性面板数据。与战斗共用 _validate_state 的校验与 aggregate 的聚合——
+## 面板数字与战斗数字同源；非法状态拒绝，绝不静默给一张错表。
+static func query_stats(state: Dictionary, content_db: ContentDB) -> Dictionary:
+	var v := _validate_state(state, content_db)
+	if v["errors"].size() > 0:
+		return {"errors": v["errors"]}
+	return {"stats": StatAggregator.aggregate(content_db.attributes, v["level"], v["equipped"])}
+
+
+## 状态侧校验（等级 + 技能装配 + 穿戴实例），战斗与面板共用同一条执法路径。
+## 返回 {"errors": PackedStringArray, "level": int, "resolved_skills": Array,
+##   "equipped": Array（聚合输入）, "fx": {"on_hit" / "on_kill" / "convert"}}。
+static func _validate_state(state: Dictionary, content_db: ContentDB) -> Dictionary:
 	var errors := PackedStringArray()
 	var level := int(state.get("player_level", 0))
 	if level < 1:
@@ -149,6 +313,19 @@ static func run_encounter(state: Dictionary, content_db: ContentDB, ref: Diction
 					continue
 				entry["affixes"].append({"attribute": attr_id, "value": float(v.get("value", 0.0))})
 		equipped.append(entry)
+	return {
+		"errors": errors,
+		"level": level,
+		"resolved_skills": resolved_skills,
+		"equipped": equipped,
+		"fx": {"on_hit": fx_on_hit, "on_kill": fx_on_kill, "convert": fx_convert},
+	}
+
+
+## 战斗路径全量准备：状态校验 + 遭遇解析。errors 非空即拒绝，绝不带着坏输入开打。
+static func _prepare(state: Dictionary, content_db: ContentDB, ref: Dictionary) -> Dictionary:
+	var v := _validate_state(state, content_db)
+	var errors: PackedStringArray = v["errors"]
 
 	# 遭遇解析：-1 = 首领单挑；普通遭遇下标越界即错
 	var zone_id := String(ref.get("zone_id", ""))
@@ -181,33 +358,78 @@ static func run_encounter(state: Dictionary, content_db: ContentDB, ref: Diction
 			monster_of_display[display_id] = String(mrec["id"])
 			mons.append({"id": display_id, "stats": mrec["stats"]})
 
-	if errors.size() > 0:
-		return {"errors": errors}
-
-	var stats := StatAggregator.aggregate(content_db.attributes, level, equipped)
-	var seed := DeterministicRng.seed_from(_seed_parts(state, zone_id, encounter_index, level))
-	var rng := DeterministicRng.new(seed)
-	var sim := EncounterSim.run({
-		"stats": stats,
-		"skills": resolved_skills,
-		"effects": {"on_hit": fx_on_hit, "on_kill": fx_on_kill, "convert": fx_convert},
-	}, mons, rng)
-	if String(sim["result"]) == "stalemate":
-		return {"errors": PackedStringArray([
-			"encounter exceeded the tick budget: content cannot converge (check monster HP vs player damage)",
-		])}
-	var ilvl := int(zone["level"])  # 掉落 ilvl 锚 = 区域等级（难度阶偏移归进度票）
-	var looted := _with_drops(sim["events"], monster_of_display,
-			encounter_index == BOSS_ENCOUNTER, ilvl, content_db, rng)
-	var drop_errors: PackedStringArray = looted["errors"]
-	if not drop_errors.is_empty():
-		return {"errors": drop_errors}
 	return {
-		"result": String(sim["result"]),
-		"duration_ticks": int(sim["duration_ticks"]),
-		"events": looted["events"],
-		"new_state": state,
+		"errors": errors,
+		"level": v["level"],
+		"resolved_skills": v["resolved_skills"],
+		"equipped": v["equipped"],
+		"fx": v["fx"],
+		"zone_id": zone_id,
+		"encounter_index": encounter_index,
+		"mons": mons,
+		"monster_of_display": monster_of_display,
+		"is_leader": encounter_index == BOSS_ENCOUNTER,
+		"ilvl": int(zone["level"]) if zone != null else 0,
 	}
+
+
+## 续跑句柄 = 模拟快照（tick/player_hp/pnext/mons/cooldown/rng_state 六键原样）
+## + 累计事件流 + 遭遇怪物清单。句柄是瞬态对象，只活在调用方内存里（在线循环
+## 手里），不入档。
+static func _resume_handle(sim_resume: Dictionary, cum_events: Array, mons: Array) -> Dictionary:
+	var handle: Dictionary = sim_resume.duplicate()
+	handle["events"] = cum_events
+	handle["monster_ids"] = _monster_ids(mons)
+	return handle
+
+
+## 遭遇的怪物显示 id 清单（站位序）——句柄附件与句柄校验共用。
+static func _monster_ids(mons: Array) -> Array:
+	var ids: Array = []
+	for m in mons:
+		ids.append(String(m["id"]))
+	return ids
+
+
+## 句柄校验：RESUME_KEYS 齐全 + 形状正确 + 怪物清单与本次解析一致；不匹配 =
+## 拒绝续跑，绝不静默续跑错场。
+static func _check_resume(resume: Dictionary, mons: Array) -> PackedStringArray:
+	var errors := PackedStringArray()
+	for key in RESUME_KEYS:
+		if not resume.has(key):
+			errors.append("resume handle missing key: %s" % key)
+	if not errors.is_empty():
+		return errors
+	var current := _monster_ids(mons)
+	var handle_ids: Array = resume["monster_ids"]
+	if JSON.stringify(handle_ids) != JSON.stringify(current):
+		errors.append("resume handle does not match the resolved encounter (monster list changed)")
+	if not (resume["mons"] is Array) or (resume["mons"] as Array).size() != current.size():
+		errors.append("resume handle does not match the resolved encounter (monster states)")
+	else:
+		for rh in resume["mons"]:
+			if not (rh is Dictionary) or not rh.has("hp") or not rh.has("next"):
+				errors.append("resume handle monster states need hp and next")
+				break
+	if not (resume["events"] is Array):
+		errors.append("resume handle events must be an array")
+	if not (resume["cooldown"] is Dictionary):
+		errors.append("resume handle cooldown must be a dictionary")
+	return errors
+
+
+## new_state = 输入状态的深拷贝 + 掉落入包（入包序）；输入状态永不被改写。
+## inventory 缺失即建（形状归一化，存档票拿到的是完整形状）。
+static func _state_with_drops_banked(state: Dictionary, banked: Array) -> Dictionary:
+	var next_state: Dictionary = state.duplicate_deep(Resource.DeepDuplicateMode.DEEP_DUPLICATE_ALL)
+	var inv: Array = []
+	if next_state.get("inventory") is Array:
+		inv = next_state["inventory"]
+	else:
+		next_state["inventory"] = inv
+	for inst in banked:
+		inv.append(inst)
+	return next_state
 
 
 ## 掉落：逐条 on_kill 走三层判定链（击杀是唯一入口），命中即在它之后追加 drop
