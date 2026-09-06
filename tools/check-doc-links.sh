@@ -38,6 +38,7 @@ for f in $files; do
 		for tok in $(printf '%s\n' "$line" | grep -oE '[A-Za-z0-9_./-]+\.md' || true); do
 			case "$tok" in
 				*://*) continue ;;
+				//*) continue ;;
 				.codebuddy/*) continue ;;
 			esac
 			case " $ALLOWLIST " in *" $tok "*) continue ;; esac

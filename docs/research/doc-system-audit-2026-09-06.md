@@ -71,13 +71,13 @@
 
 ## 3. 病灶清单（按严重度）
 
-- **F1 规则层改进卡在工作区未入库。** `audit-runbooks.md` / `content-data-conventions.md` / `toolchain-win.md` 三页 untracked；`AGENTS.md` / `godot-standards.md` / `process-audit.md` 三处改动未提交。`git show HEAD:AGENTS.md` 确认已入库版本**仍是旧版**：不含 Windows 约束、content 约定、拆分后的 process-audit 双页指针。后果：换机 / 新克隆 / CI / 评审者读到的执法体系是三天前的。
+- **F1 规则层改进卡在工作区未入库。** `audit-runbooks.md` / `content-data-conventions.md` / `toolchain-win.md` 三页 untracked；`AGENTS.md` / `godot-standards.md` / `process-audit.md` 三处改动未提交。`git show HEAD:AGENTS.md` 确认已入库版本**仍是旧版**：不含 Windows 约束、content 约定、拆分后的 process-audit 双页指针。后果：换机 / 新克隆 / CI / 评审者读到的执法体系是三天前的。（本次已解，见 §6。）
 - **F2 悬空引用已知未修 = 反哺链条断裂的实证。** `content-data-conventions.md` L25 曾指向一份已随 2026-09-05 回滚删除的存档约定页；09-06 的 AGENTS.md 审查已明确记录这一条，至今未动。（本次已修：该引用改写为「待存档票 #38 重建」，并加机器检查防复发。）连带：09-05 被 `git clean -fd` 删掉的 ADR-0002（存档原子写恢复链）与 `api-4-7-index.json`（39 条 4.5+ 变更快查索引），记忆里写着「已落地」，仓库里零痕迹；存档侧约定（心跳读侧不走恢复链、手改 save.json 五规则）**全部无落点**。
 - **F3 元层教训几乎全未回流。** 机制可靠性三层排序、STATUS.md 真相不可评审、文档重排后须 grep 全仓锚点、code-review Spec 轴盲区、Windows 杀毒锁文件型假绿、跨文件改签名 `read_lints` 不报——六条全部只在记忆里。这是「关于机制本身的教训」被系统性漏掉，而它恰恰决定机制能否进化。
 - **F4 AGENTS.md 内部自相矛盾。** L48 写「可评审的规则不该只存在于 `.codebuddy/`」，L38 却要求每条 v1 裁量「同时进 `.codebuddy/memory/STATUS.md`」——而这些裁量的真相已在 GitHub 关票评论里。规则自己违反自己。
 - **F5 体量倒挂。** 87 KB 不可评审的记忆 vs 31.5 KB 可评审的规则。精简 MEMORY.md（压到 1.8 KB）没有解决问题，只是把体积赶进了日志。
 - **F6 「部分回流」成片。** 9 条只落一半：`PackedStringArray` 那条写成了 `pop_back` 变体、`gh api` 数组语法未落、Timer 需 `is_inside_tree()` 未落、掉落层序只在代码注释里。碎片比缺失更难发现。
-- **F7 未被任何规则覆盖的高危假绿源。** Windows 对「刚 rename 落盘的文件」立即删 / 改名会间歇失败（杀毒锁文件），零改动重跑即绿——docs 全库零命中，而它的判据（失败点漂移 + 重跑即绿）正是最容易被误判成大面积回归的形态。
+- **F7 未被任何规则覆盖的高危假绿源。** Windows 对「刚 rename 落盘的文件」立即删 / 改名会间歇失败（杀毒锁文件），零改动重跑即绿——docs 全库零命中，而它的判据（失败点漂移 + 重跑即绿）正是最容易被误判成大面积回归的形态。（本次已补，见 §6。）
 - **F8 `schema/` 无消费者。** CI 只在 `game/**` 变更时触发，无 JSON Schema 校验步骤；`AGENTS.md` 无 schema 顶层指针。（已知，待用户拍板。）
 - **F9 探针的乐观偏差。** 两题都过了，但题目本身要求「判断是否符合规范」，等于把答案指了一半。真正的高频场景——改一行、加个字段、跑条命令、写份设计稿——不会唤起「我要去找规范文档」这个意图，指针就静默不触发。这是①只能判 🟡 的原因。
 

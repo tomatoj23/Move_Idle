@@ -1,0 +1,6 @@
+# 只钉会被 shell 执行的文件：CRLF 会让 #!/bin/sh 解释器行失效，
+# 在 core.autocrlf=true 的机器上「克隆下来就跑不动」，而 CI（Linux）永远是 LF，
+# 属于本地静默失败、CI 查不出来的那类问题。
+# game/ 自带 .gitattributes（* text=auto eol=lf），这里不重复覆盖。
+tools/*.sh text eol=lf
+.githooks/* text eol=lf

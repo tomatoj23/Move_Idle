@@ -18,4 +18,4 @@ fi
 # 悬空指针是文档重排 / 回滚后最易腐、肉眼最难发现的一类问题（审计 F2）。
 # 用 source 而非 sh 调用：钩子本身由 sh 执行，source 不依赖 PATH 里有没有 sh，
 # 且脚本缺失时是硬失败而不是静默跳过（静默跳过 = 假绿）。
-. tools/check-doc-links.sh
+. "$(git rev-parse --show-toplevel)/tools/check-doc-links.sh"
