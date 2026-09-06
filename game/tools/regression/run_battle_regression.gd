@@ -1738,7 +1738,8 @@ func _run_drop_determinism(tmp: String) -> void:
 			_check_closed(af, AFFIX_KEYS, "affix instance")
 			for v in af["values"]:
 				_check_closed(v, VALUE_KEYS, "affix value")
-	# ilvl 锚 = 区域等级（难度阶偏移归进度票，本票 ilvl = zone.level）
+	# ilvl 锚 = 有效等级；#32 夹具 tier 恒 0，故此处等于区域等级（#34 落地后
+	# 阶偏移进入 ilvl，等级断言的完整口径见 progression section）。
 	_check(int(drops[0]["instance"]["ilvl"]) == 12, "instance ilvl is the zone level (12)")
 
 	# 事件序：drop 紧跟在产生它的那次 on_kill 之后（击杀是唯一入口）。
@@ -2906,10 +2907,12 @@ func _run_prog_fallback(tmp: String) -> void:
 	_check(int(s["unlocked"]["zone_tiers"]["zone_fb1"]) == 1,
 			"fallback: zone_fb1 tier 1 is unlocked by the boss kill")
 
-	# 裸装（继承解锁游标，戴环保证零暴击）在 zone_fb2 第 0 场败给双 mook：
-	# 先杀一只再倒下 —— 败场也入账击杀经验。
+	# 裸装（继承解锁游标与走图锚，戴环保证零暴击）在 zone_fb2 第 0 场败给双 mook：
+	# 先杀一只再倒下 —— 败场也入账击杀经验。锚带在状态里（= 走图此刻在 fb2），
+	# 回退断言才不会被「归一化默认值恰好等于落点」掩盖。
 	var naked := {"player_level": 1, "equipment": {"trinket": ring}, "skills": [],
-			"unlocked": s["unlocked"]}
+			"unlocked": s["unlocked"],
+			"idle_spot": {"zone_id": "zone_fb2", "tier": 0}}
 	var rl := SessionFacade.run_encounter(naked, db, {"zone_id": "zone_fb2", "encounter_index": 0})
 	_check(not rl.has("errors") and String(rl.get("result", "")) == "lose",
 			"fallback: the naked player loses the zone_fb2 opener")
