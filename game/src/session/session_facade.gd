@@ -50,9 +50,9 @@ const TICK_MS := 100  # 引擎常量：tick 间隔，集中管理点（#24 引�
 const BOSS_ENCOUNTER := -1  # encounter_index 哨兵：首领固定单挑（multi-monster-encounters #1）
 const SKILL_SLOTS := 3  # 引擎常量：三主动技能槽（build-system #2.2）
 const PLAYER_ID := "player"  # 事件流里的玩家身份（击杀怪物才掉落，玩家倒下不掉）
-# 续跑句柄的必需键（模拟快照 5 键 + 门面附件 3 键）；_check_resume 据此执法。
+# 续跑句柄的必需键（模拟快照 5 键 + 门面附件 4 键）；_check_resume 据此执法。
 const RESUME_KEYS: Array[String] = ["tick", "player_hp", "pnext", "mons", "cooldown",
-	"rng_state", "events", "monster_ids"]
+	"rng_state", "events", "monster_ids", "tier"]
 
 
 ## 耗时换算：tick 是数值层原生时间单位，表现层 / 统计层需要毫秒时经此换算。
@@ -96,7 +96,7 @@ static func run_encounter(state: Dictionary, content_db: ContentDB, ref: Diction
 		rng = DeterministicRng.new(DeterministicRng.seed_from(
 				_seed_parts(state, prep["zone_id"], prep["encounter_index"], prep["level"])))
 	else:
-		var handle_errors := _check_resume(resume, prep["mons"])
+		var handle_errors := _check_resume(resume, prep["mons"], int(prep["tier"]))
 		if handle_errors.size() > 0:
 			return {"errors": handle_errors}
 		sim_resume = {
@@ -124,7 +124,7 @@ static func run_encounter(state: Dictionary, content_db: ContentDB, ref: Diction
 			"result": "in_progress",
 			"duration_ticks": int(sim["duration_ticks"]),
 			"events": cum,
-			"resume": _resume_handle(sim["resume"], cum, prep["mons"]),
+			"resume": _resume_handle(sim["resume"], cum, prep["mons"], int(prep["tier"])),
 		}
 	var events: Array = sim["events"]
 	if not resume.is_empty():
@@ -475,12 +475,14 @@ static func _prepare(state: Dictionary, content_db: ContentDB, ref: Dictionary) 
 
 
 ## 续跑句柄 = 模拟快照（tick/player_hp/pnext/mons/cooldown/rng_state 六键原样）
-## + 累计事件流 + 遭遇怪物清单。句柄是瞬态对象，只活在调用方内存里（在线循环
-## 手里），不入档。
-static func _resume_handle(sim_resume: Dictionary, cum_events: Array, mons: Array) -> Dictionary:
+## + 累计事件流 + 遭遇怪物清单 + 遭遇难度阶。句柄是瞬态对象，只活在调用方内存
+## 里（在线循环手里），不入档。
+static func _resume_handle(sim_resume: Dictionary, cum_events: Array, mons: Array,
+		tier: int) -> Dictionary:
 	var handle: Dictionary = sim_resume.duplicate()
 	handle["events"] = cum_events
 	handle["monster_ids"] = _monster_ids(mons)
+	handle["tier"] = tier
 	return handle
 
 
@@ -492,9 +494,10 @@ static func _monster_ids(mons: Array) -> Array:
 	return ids
 
 
-## 句柄校验：RESUME_KEYS 齐全 + 形状正确 + 怪物清单与本次解析一致；不匹配 =
-## 拒绝续跑，绝不静默续跑错场。
-static func _check_resume(resume: Dictionary, mons: Array) -> PackedStringArray:
+## 句柄校验：RESUME_KEYS 齐全 + 形状正确 + 怪物清单与难度阶与本次解析一致
+## （#34：同 zone/index 换 tier 续跑 = HP 快照套在缩放不同的怪物上，拒绝）；
+## 不匹配 = 拒绝续跑，绝不静默续跑错场。
+static func _check_resume(resume: Dictionary, mons: Array, tier: int) -> PackedStringArray:
 	var errors := PackedStringArray()
 	for key in RESUME_KEYS:
 		if not resume.has(key):
@@ -505,6 +508,8 @@ static func _check_resume(resume: Dictionary, mons: Array) -> PackedStringArray:
 	var handle_ids: Array = resume["monster_ids"]
 	if JSON.stringify(handle_ids) != JSON.stringify(current):
 		errors.append("resume handle does not match the resolved encounter (monster list changed)")
+	if int(resume["tier"]) != tier:
+		errors.append("resume handle does not match the resolved encounter (tier changed)")
 	if not (resume["mons"] is Array) or (resume["mons"] as Array).size() != current.size():
 		errors.append("resume handle does not match the resolved encounter (monster states)")
 	else:
