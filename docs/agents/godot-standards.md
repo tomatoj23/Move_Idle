@@ -75,7 +75,7 @@
 - `Array.filter()` 对 Variant 表达式（如 `r["events"]`）无法类型推断 → 显式 `var x: Array = ...filter(...)`。
 - `const X: Array = OtherClass.CONST` 跨类引用可用（单一真相去重复）。
 - `JSON.parse_string` 数字全回读 float，整型字段校验须宽接收；`JSON.stringify(Vector2)` 丢类型，入档显式 `{x, y}`。
-- `PackedStringArray` 无 `pop_back()`（那是 `Array` 的 API）。
+- `PackedStringArray` 无 `pop_back()`（那是 `Array` 的 API）；且 Packed* 系列是**值类型**——传参进函数后就地 `append` 不外传，函数内要改就**以返回值传出**（实测：门面解锁门执法助手 `_check_unlock_gate`）。
 - 浮点边界：作除数的常量选可精确表示的值（如 `0.75`）；`10 / 0.8` 落在 .5 附近会让 `roundi` 的 interval 判定歧义。
 
 ### 2D
