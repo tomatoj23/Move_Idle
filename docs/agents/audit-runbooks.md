@@ -18,6 +18,22 @@
 
 ## Runbook B：会话导出审计（测"声称 = 实做"）
 
+### 执行工具
+
+导出件动辄 1MB+，直接读会爆上下文。**先降维再判读**：
+
+    powershell -File tools/session-audit.ps1 -InputFile <导出.json>                  # 全量
+    powershell -File tools/session-audit.ps1 -InputFile <导出.json> -TimelineOnly     # 只要时间线 + 锚点
+
+输出六段：结构勘察 / 消息清单 / 工具调用时间线 / 三层锚点计数 / 关键词上下文 / 对话正文。纪律三条：
+
+- **先看第 1 段「结构勘察」**：节点类型与预期不符就先修脚本映射，不硬套（Runbook B 第 1 条同义）。
+- **脚本只降维、不判分。** 判据在预登记表里，脚本里一条都没有——脚本能改判据，就等于能自造绿。
+- 导出件与 digest 都放 `.codebuddy/audit/`（被 gitignore，不入仓库；也避免被测会话看见审计痕迹）。
+
+**预登记判据表刻意不放在仓库里**：放进仓库 = 被测会话能读到 = 提前知道答案。
+它在 `.codebuddy/memory/pointer-audit-2026-09-06.md`，含四档判分与「判绿陷阱」列。
+
 对被测/实弹会话的导出 JSON 做固定检查单：
 
 1. 提取工具调用时间线（`tool-call` 节点序列 + 参数摘要；节点结构 = type/toolCallId/toolName/args）。

@@ -44,7 +44,7 @@ The enforcement system is itself validated, not assumed. When work hits a gap in
 
 ## Working conventions
 
-- 提交纪律：`git add` 只加具体路径；提交前确认改动清单与当前票范围一致（工作区有其它会话遗留改动时用路径限定 diff / review）。
+- 提交纪律：`git add` 只加具体路径；提交走 pre-commit 钩子（反模式 lint + 文档互引检查），被拦下就修到过，误报则改钩子与 CI 里的模式；提交前确认改动清单与当前票范围一致（工作区有其它会话遗留改动时用路径限定 diff / review）。
 - `.codebuddy/` 被 gitignore：搜索工具查不到其中文件，查证用已知路径直读；需要长期有效、可评审的**规则**落本文件与 `docs/agents/`，状态与日志留在 `.codebuddy/memory/`（`.codebuddy/memory/STATUS.md` 只留当前票 + 上一票的滚动站位，不复制裁量全文）。
 - 子代理能力边界：`code-explorer` 无网络、无 `use_skill`、无写文件 → research 类任务 = 子代理出底稿 + 主会话 `web_search` / `web_fetch` 核证落盘。
 - Agent skills：运行时 `<available_skills>` 只暴露一部分，不在列表 ≠ 未安装，需要时直接 `use_skill` 按名调用。

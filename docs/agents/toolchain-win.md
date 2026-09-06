@@ -29,6 +29,15 @@
 - **机器相关绝对路径不进远端仓库**（编辑器安装位置、skills 安装目录等）：见 `.codebuddy/memory/local-env.md`。
 - 本地校验：`godot --headless --path game --script res://tools/validation/check_project.gd`（新增 `.gd` 前必须先 `--import`，见 `godot-standards.md`）。
 
+## 本机 PATH 里没有 sh（跑仓库自带 shell 脚本时）
+
+- `cmd /c "sh tools/check-doc-links.sh > f 2>&1"` **会失败**（`'sh' is not recognized`，exit 1）。仓库文档里写的 `sh tools/check-doc-links.sh` 在 CI（Linux）直接可用，**在本机 cmd 里不可用**。
+- 本机两种可用写法：
+  - `"C:\Program Files\Git\bin\sh.exe" tools/check-doc-links.sh`（cwd 需在仓库根）
+  - `& "C:\Program Files\Git\bin\bash.exe" -c "cd /d/My_Projects/Move_Idle && sh tools/check-doc-links.sh"`
+- **pre-commit 钩子不受影响**——它由 Git 自带的 sh 执行，与 PATH 无关。
+- 判定脚本是否真跑过，看输出里有没有 `doc-links OK`；不要只看退出码。
+
 ## git / gh
 
 - GraphQL 内嵌双引号会被 PowerShell 5.1 吞（语法错）；`--jq` 表达式引号易碎，改用管道 `ConvertFrom-Json`；`gh api` 用显式完整仓库路径。
