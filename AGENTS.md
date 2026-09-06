@@ -35,7 +35,7 @@ The enforcement system is itself validated, not assumed. When work hits a gap in
 每票收尾必做：
 
 - **跨票接缝**：本票产出物若会被下游票消费，加一条「下游消费路径」断言（不只验产出物形状），别让下游开工第一天撞格式墙。
-- **v1 裁量**（spec / 设计文档未钉的工程判断）：实现时按裁量写 → 关票评论全文记录可否决理由 → 收尾回复里单列给用户拍板 → 同时进 `.codebuddy/memory/STATUS.md`。
+- **v1 裁量**（spec / 设计文档未钉的工程判断）：实现时按裁量写 → 关票评论全文记录可否决理由（**持久真相在此**：`.codebuddy/` 被 gitignore、不可评审，不承载真相）→ 收尾回复里单列给用户拍板。
 - **票尾复查清单**：账目闭合（断言数对得上）+ 各 section 断言密度（≥10 条，防空样本假绿）+ 逐条 AC 覆盖 + 跨票接缝。
 
 ### Windows / PowerShell 环境约束（仅本机；CI 在 Linux）
@@ -45,7 +45,7 @@ The enforcement system is itself validated, not assumed. When work hits a gap in
 ## Working conventions
 
 - 提交纪律：`git add` 只加具体路径；提交前确认改动清单与当前票范围一致（工作区有其它会话遗留改动时用路径限定 diff / review）。
-- `.codebuddy/` 被 gitignore：搜索工具查不到其中文件，查证用已知路径直读；需要长期有效、可评审的**规则**落本文件与 `docs/agents/`，状态与日志留在 `.codebuddy/memory/`。
+- `.codebuddy/` 被 gitignore：搜索工具查不到其中文件，查证用已知路径直读；需要长期有效、可评审的**规则**落本文件与 `docs/agents/`，状态与日志留在 `.codebuddy/memory/`（`.codebuddy/memory/STATUS.md` 只留当前票 + 上一票的滚动站位，不复制裁量全文）。
 - 子代理能力边界：`code-explorer` 无网络、无 `use_skill`、无写文件 → research 类任务 = 子代理出底稿 + 主会话 `web_search` / `web_fetch` 核证落盘。
 - Agent skills：运行时 `<available_skills>` 只暴露一部分，不在列表 ≠ 未安装，需要时直接 `use_skill` 按名调用。
 - 命令输出必须整体落盘后 grep error，禁止只看末尾或截尾——靠前单元的错误会被吞掉造成假绿。
