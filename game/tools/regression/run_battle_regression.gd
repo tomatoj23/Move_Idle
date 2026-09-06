@@ -2559,6 +2559,15 @@ func _run_mid_encounter_swap(tmp: String) -> void:
 	if l2.has("errors"):
 		return
 	_check(String(l2["result"]) == "win", "slice: the banked loot run wins")
+	# RNG 连续性必须在「roll 影响结果」的夹具上验证（玩家暴击 5% 与掉落 gate 都吃
+	# rng）：切片+续跑必须与不打断的整场逐字一致，含每一次暴击数值与掉落 roll。
+	var lfull := SessionFacade.run_encounter(ls, ldb, REF_LOOT_FIRST)
+	_check(not lfull.has("errors") and String(lfull["result"]) == "win",
+			"slice: the uninterrupted loot run wins")
+	if lfull.has("errors"):
+		return
+	_check(JSON.stringify(l2["events"]) == JSON.stringify(lfull["events"]),
+			"resume: crit rolls and drop gates carry the RNG stream (identical stream incl. drops)")
 	var order_bad := 0
 	for i in (l2["events"] as Array).size():
 		var e: Dictionary = l2["events"][i]
