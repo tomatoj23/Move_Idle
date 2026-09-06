@@ -13,6 +13,12 @@ extends SceneTree
 ## skill loadout untouched, offline snapshot replay), query_stats panel data,
 ## mid-encounter equipment swap via slice/resume (remaining ticks re-aggregated,
 ## monster HP / cooldowns / RNG carried, drops banked at completion).
+## #34 headless regression: progression structure — unlock gates (zone chain by
+## order, tiers by boss kills), tier scaling (monster stats x mult^n, effective
+## level = zone level + n x step), drop ilvl anchored on the effective level
+## (player level excluded), kill exp and level-ups at encounter boundaries,
+## boss-win unlocks with first-clear anchor advance, loss fallback (never
+## stuck), idle spot choice and the next_ref walk (transient, restart re-anchors).
 ## The ONLY seam under test is SessionFacade.run_encounter (spec #24 Testing Decisions);
 ## internal pure functions (aggregation / encounter sim / PRNG) are NOT tested directly.
 ## Run:
@@ -140,6 +146,14 @@ func _initialize() -> void:
 	_run_query_stats(content_root)
 	_section("mid-encounter swap: slice, resume, re-aggregate")
 	_run_mid_encounter_swap(tmp)
+	_section("progression: unlock gates, tier scaling, ilvl")
+	_run_prog_unlock_scaling(tmp)
+	_section("progression: exp, level-ups, base stats")
+	_run_prog_xp(tmp)
+	_section("progression: fallback, idle spot, next_ref walk")
+	_run_prog_fallback(tmp)
+	_section("progression: chain top, re-farm stickiness, state seam")
+	_run_prog_chain_top(tmp)
 
 	_rmtree(tmp)
 	_report()
@@ -1848,8 +1862,8 @@ func _with_filter(rec: Dictionary, extra: Dictionary) -> Dictionary:
 	return rec
 
 
-## 采样 N 场遭遇：等级逐场递增只为换种子（ilvl 只由区域等级决定，
-## progression-structure §6：角色等级不参与 ilvl）。
+## 采样 N 场遭遇：等级逐场递增只为换种子（夹具 tier 恒 0，ilvl = 有效等级 =
+## 区域等级；#34 后阶偏移进入 ilvl，角色等级依旧不参与，progression-structure §6）。
 func _drop_sample(db: ContentDB, ref: Dictionary, runs: int) -> Dictionary:
 	var drops: Array = []
 	var kills := 0
@@ -2612,3 +2626,433 @@ func _player_raws(events: Array) -> Array:
 		if String(e["type"]) == "on_attack" and String(e["attacker"]) == "player":
 			raws.append(int(e["raw_damage"]))
 	return raws
+
+
+# ---------------------------------------------------------------- #34 sections
+
+## 九类目录骨架 + 5 个 add 属性（进度夹具自管区域清单，不写 zone_mini）。
+func _write_prog_skeleton(root: String) -> void:
+	for rel in ["attributes", "items/base", "affixes", "monsters", "monster_modifiers",
+			"droptables", "zones", "skills", "sets"]:
+		DirAccess.make_dir_recursive_absolute(root.path_join(rel))
+	for a in [["max_hp", "add"], ["attack_power", "add"], ["attack_speed", "add"],
+			["crit_chance", "add"], ["damage_reduction", "add"]]:
+		_write_json(root.path_join("attributes/%s.json" % a[0]),
+				{"id": a[0], "name": a[0], "aggregation": a[1]})
+
+
+## #34 进度夹具：三区域链（order 1/2/3，level 1/2/3）。mob_prog 1 血且必掉
+## （首领样本与掉落断言用）；mob_champ 40 血 8 攻（阶缩放观察样本，无掉落表）。
+## base_prog_ring 固有属性 crit_chance -10 —— 5 - 10 = 负暴击率，戴环玩家永不
+## 暴击，伤害断言零歧义。词缀池带一条 stat 与一条传奇：任意稀有度 roll 都能出实例。
+func _write_prog_db(root: String) -> String:
+	_write_prog_skeleton(root)
+	_write_json(root.path_join("monsters/mob_prog.json"), {
+		"id": "mob_prog", "name": "Prog", "drop_table": "dt_prog",
+		"stats": {"max_hp": 1.0, "attack_power": 1.0, "attack_speed": 1.0, "crit_chance": 0.0}})
+	_write_json(root.path_join("monsters/mob_champ.json"), _mini_monster("mob_champ",
+			{"max_hp": 40.0, "attack_power": 8.0, "attack_speed": 1.0, "crit_chance": 0.0}))
+	_write_json(root.path_join("items/base/base_mini_blade.json"), _mini_blade(30.0))
+	_write_json(root.path_join("items/base/base_prog_ring.json"), {
+		"id": "base_prog_ring", "name": "Prog Ring", "slot": "trinket", "category": "ring",
+		"implicit_mods": [{"attribute": "crit_chance", "value": -10.0}]})
+	_write_json(root.path_join("droptables/dt_prog.json"), {"id": "dt_prog", "entries": [
+		{"type": "base", "ref": "base_mini_blade", "weight": 100}]})
+	_write_json(root.path_join("affixes/affix_prog_pre.json"),
+			_affix_rec("affix_prog_pre", "Keen", "prefix", "attack_power",
+					[{"ilvl": 1, "min": 1, "max": 3}]))
+	_write_json(root.path_join("affixes/affix_prog_leg.json"),
+			_legend_rec("affix_prog_leg", "Doomsprog"))
+	for z in [
+		{"id": "zone_prog1", "name": "P1", "level": 1,
+			"encounters": [{"monster": "mob_prog", "count": 1}, {"monster": "mob_prog", "count": 1}],
+			"boss": "mob_prog", "order": 1},
+		{"id": "zone_prog2", "name": "P2", "level": 2,
+			"encounters": [{"monster": "mob_prog", "count": 1}],
+			"boss": "mob_prog", "order": 2},
+		{"id": "zone_prog3", "name": "P3", "level": 3,
+			"encounters": [{"monster": "mob_champ", "count": 1}],
+			"boss": "mob_prog", "order": 3},
+	]:
+		_write_json(root.path_join("zones/%s.json" % z["id"]), z)
+	return root
+
+
+## #34 回退夹具：zone_fb1（order 1）普通遭遇 = [1 血小怪, 杀手怪]（第 0 场裸装可
+## 胜、第 1 场裸装必败），首领 = 杀手怪（裸装败给首领 → 退区域起点）；zone_fb2
+## （order 2）= 两只 mook（裸装先杀一只再倒下——败场也带击杀经验）。
+func _write_fb_db(root: String) -> String:
+	_write_prog_skeleton(root)
+	_write_json(root.path_join("monsters/mob_prog.json"), _mini_monster("mob_prog",
+			{"max_hp": 1.0, "attack_power": 1.0, "attack_speed": 1.0, "crit_chance": 0.0}))
+	_write_json(root.path_join("monsters/mob_killer.json"), _mini_monster("mob_killer",
+			{"max_hp": 12.0, "attack_power": 200.0, "attack_speed": 1.0, "crit_chance": 0.0}))
+	_write_json(root.path_join("monsters/mob_mook.json"), _mini_monster("mob_mook",
+			{"max_hp": 8.0, "attack_power": 200.0, "attack_speed": 1.0, "crit_chance": 0.0}))
+	_write_json(root.path_join("items/base/base_mini_blade.json"), _mini_blade(30.0))
+	_write_json(root.path_join("items/base/base_prog_ring.json"), {
+		"id": "base_prog_ring", "name": "Prog Ring", "slot": "trinket", "category": "ring",
+		"implicit_mods": [{"attribute": "crit_chance", "value": -10.0}]})
+	for z in [
+		{"id": "zone_fb1", "name": "F1", "level": 1,
+			"encounters": [{"monster": "mob_prog", "count": 1},
+					{"monster": "mob_killer", "count": 1}],
+			"boss": "mob_killer", "order": 1},
+		{"id": "zone_fb2", "name": "F2", "level": 2,
+			"encounters": [{"monster": "mob_mook", "count": 2}],
+			"boss": "mob_prog", "order": 2},
+	]:
+		_write_json(root.path_join("zones/%s.json" % z["id"]), z)
+	return root
+
+
+## AC1/AC2/AC3/AC7：解锁门（区域链按序、阶按首领、负阶拒绝）；首领胜的两维解锁
+## 与首通锚推进；难度阶缩放（怪物属性 × 难度阶乘数^n，零暴击夹具下逐点核对）；
+## 掉落 ilvl = 有效等级且与角色等级无关。
+func _run_prog_unlock_scaling(tmp: String) -> void:
+	var db := _load_db(_write_prog_db(tmp.path_join("prog_gate")))
+	_check(db.errors.is_empty(), "progression fixture loads with zero errors")
+	if not db.errors.is_empty():
+		return
+	var blade := {"base": "base_mini_blade", "affixes": []}
+	var ring := {"base": "base_prog_ring", "affixes": []}
+	var state := {"player_level": 1, "equipment": {"weapon": blade}, "skills": []}
+
+	var r := SessionFacade.run_encounter(state, db, {"zone_id": "zone_prog1", "encounter_index": 0})
+	_check(not r.has("errors"), "progression: fresh state fights the first zone (implicit unlock defaults)")
+	_check(String(r.get("result", "")) == "win", "progression: the first-zone fight wins")
+	_check(SessionFacade.run_encounter(state, db,
+			{"zone_id": "zone_prog2", "encounter_index": 0}).has("errors"),
+			"progression: a zone beyond the unlocked order is refused (AC1 gate)")
+	_check(SessionFacade.run_encounter(state, db,
+			{"zone_id": "zone_prog1", "encounter_index": 0, "tier": 1}).has("errors"),
+			"progression: a tier beyond the unlocked tier is refused (AC2 gate)")
+	_check(SessionFacade.run_encounter(state, db,
+			{"zone_id": "zone_prog1", "encounter_index": 0, "tier": -1}).has("errors"),
+			"progression: a negative tier is refused")
+
+	var rb := SessionFacade.run_encounter(state, db,
+			{"zone_id": "zone_prog1", "encounter_index": -1})
+	_check(not rb.has("errors") and String(rb.get("result", "")) == "win",
+			"progression: the tier-0 boss falls")
+	if rb.has("errors") or String(rb.get("result", "")) != "win":
+		return
+	var ns: Dictionary = rb["new_state"]
+	var unlocked: Dictionary = ns["unlocked"]
+	_check(int(unlocked["max_zone_order"]) == 2,
+			"progression: boss kill unlocks the next zone order (AC1)")
+	_check(int(unlocked["zone_tiers"]["zone_prog1"]) == 1,
+			"progression: boss kill unlocks tier 1 (AC2)")
+	_check(String(ns["idle_spot"]["zone_id"]) == "zone_prog2" and int(ns["idle_spot"]["tier"]) == 0,
+			"progression: first clear advances the anchor to the next zone")
+	_check(not SessionFacade.run_encounter(ns, db,
+			{"zone_id": "zone_prog2", "encounter_index": 0}).has("errors"),
+			"progression: the newly unlocked zone is fightable")
+	_check(not SessionFacade.run_encounter(ns, db,
+			{"zone_id": "zone_prog1", "encounter_index": 0, "tier": 1}).has("errors"),
+			"progression: the newly unlocked tier is fightable")
+
+	# 阶缩放（AC3）：先沿链解锁 zone_prog3 的 0/1/2 阶（1 血首领任意阶一击必杀）。
+	var push := ns
+	for step in [{"zone_id": "zone_prog2", "encounter_index": -1},
+			{"zone_id": "zone_prog3", "encounter_index": -1},
+			{"zone_id": "zone_prog3", "encounter_index": -1, "tier": 1}]:
+		var rs := SessionFacade.run_encounter(push, db, step)
+		_check(not rs.has("errors"), "progression: unlock push step runs clean")
+		if rs.has("errors"):
+			return
+		push = rs["new_state"]
+
+	# 戴环裸装（AP 10、零暴击）打 zone_prog3 的 champ（基准 40HP/8AP，乘数 1.15）。
+	# 「属性随阶缩放」取全属性口径：attack_speed 一并缩放 -> champ 间隔
+	# roundi(10 / 1.15^t) = 10/9/8，出手窗口随阶变密；攻击力 floor(8 x 1.15^t)
+	# = 8/9/10；max_hp 40/46/52.9 -> 玩家出手数 4/5/6、承伤总量 24/45/70 逐点核对。
+	# 状态带上推进循环攒出的解锁游标（p3 三阶已全开）。
+	var scaled := {"player_level": 1, "equipment": {"trinket": ring}, "skills": [],
+			"unlocked": push["unlocked"]}
+	var expected_raw := [8, 9, 10]
+	var expected_taken := [24, 45, 70]  # 存活期内被命中总量（3 击 x8 / 5 击 x9 / 7 击 x10）
+	var expected_hits := [4, 5, 6]  # 击杀所需玩家出手数（40 / 46 / 52.9 HP @ 10 伤）
+	for t in 3:
+		var rt := SessionFacade.run_encounter(scaled, db,
+				{"zone_id": "zone_prog3", "encounter_index": 0, "tier": t})
+		_check(not rt.has("errors"), "progression: tier-%d champ fight runs clean" % t)
+		if rt.has("errors"):
+			return
+		_check(String(rt["result"]) == "win", "progression: tier-%d champ fight wins" % t)
+		var m_hits: Array = rt["events"].filter(func(e): return \
+				e["type"] == "on_attack" and e["attacker"] == "mob_champ")
+		_check(m_hits.size() > 0, "progression: tier-%d champ swings before dying" % t)
+		if m_hits.is_empty():
+			return
+		_check(int(m_hits[0]["raw_damage"]) == int(expected_raw[t]),
+				"progression: tier-%d champ hit = %d (base 8 x 1.15^%d floored)"
+						% [t, int(expected_raw[t]), t])
+		_check(_damage_to(rt["events"], "player") == int(expected_taken[t]),
+				"progression: tier-%d total damage taken = %d (scaled AP, alive windows)"
+						% [t, int(expected_taken[t])])
+		_check(_hits_on(rt["events"], "mob_champ") == int(expected_hits[t]),
+				"progression: tier-%d champ needs %d player hits (scaled max_hp)"
+						% [t, int(expected_hits[t])])
+
+	# ilvl = 有效等级（AC3），角色等级不参与（AC7）。首领必掉 -> 一杀一样本。
+	var u1 := {"player_level": 1, "equipment": {"weapon": blade}, "skills": [],
+			"unlocked": {"max_zone_order": 3, "zone_tiers": {"zone_prog1": 2}}}
+	var u50 := {"player_level": 50, "equipment": {"weapon": blade}, "skills": [],
+			"unlocked": {"max_zone_order": 3, "zone_tiers": {"zone_prog1": 2}}}
+	var d1 := SessionFacade.run_encounter(u1, db,
+			{"zone_id": "zone_prog1", "encounter_index": -1, "tier": 1})
+	_check(not d1.has("errors") and _drops_of(d1["events"]).size() == 1,
+			"progression: the tier-1 boss drops exactly once")
+	if not d1.has("errors") and _drops_of(d1["events"]).size() == 1:
+		_check(int(_drops_of(d1["events"])[0]["instance"]["ilvl"]) == 11,
+				"progression: tier-1 drop ilvl = 11 (zone level 1 + 1 x step 10)")
+	var d2 := SessionFacade.run_encounter(u1, db,
+			{"zone_id": "zone_prog1", "encounter_index": -1, "tier": 2})
+	_check(not d2.has("errors"), "progression: the tier-2 boss run is clean")
+	if not d2.has("errors"):
+		_check(int(_drops_of(d2["events"])[0]["instance"]["ilvl"]) == 21,
+				"progression: tier-2 drop ilvl = 21 (zone level 1 + 2 x step 10)")
+	var d50 := SessionFacade.run_encounter(u50, db,
+			{"zone_id": "zone_prog1", "encounter_index": -1, "tier": 1})
+	_check(not d50.has("errors") and _drops_of(d50["events"]).size() == 1,
+			"progression: the level-50 boss run drops exactly once")
+	if not d50.has("errors") and _drops_of(d50["events"]).size() == 1:
+		_check(int(_drops_of(d50["events"])[0]["instance"]["ilvl"]) == 11,
+				"progression: player level 50 does not move the drop ilvl (AC7)")
+
+
+## AC6：击杀给经验（= 单位经验 × 有效等级）、跨门槛升级并保留余量、连升多级、
+## 升级抬升玩家初始属性集（query_stats 与下一场聚合可见）。
+func _run_prog_xp(tmp: String) -> void:
+	var db := _load_db(_write_prog_db(tmp.path_join("prog_xp")))
+	_check(db.errors.is_empty(), "xp fixture loads with zero errors")
+	if not db.errors.is_empty():
+		return
+	var blade := {"base": "base_mini_blade", "affixes": []}
+	var state := {"player_level": 1, "equipment": {"weapon": blade}, "skills": []}
+	var r1 := SessionFacade.run_encounter(state, db,
+			{"zone_id": "zone_prog1", "encounter_index": 0})
+	_check(not r1.has("errors") and String(r1.get("result", "")) == "win",
+			"xp: the first encounter wins")
+	if r1.has("errors"):
+		return
+	_check(int(r1["new_state"]["exp"]) == 10,
+			"xp: one eff-level-1 kill banks 10 exp (unit constant x effective level)")
+	_check(int(r1["new_state"]["player_level"]) == 1,
+			"xp: 10 exp stays below the level-2 threshold (100)")
+	var r2 := SessionFacade.run_encounter(r1["new_state"], db,
+			{"zone_id": "zone_prog1", "encounter_index": 1})
+	_check(not r2.has("errors") and int(r2["new_state"]["exp"]) == 20,
+			"xp: the next kill carries the exp pool forward (20 total)")
+
+	# 升级：90 + 10 = 100 >= 门槛(1) 100 -> level 2，余 0。
+	var up := {"player_level": 1, "exp": 90, "equipment": {"weapon": blade}, "skills": []}
+	var ru := SessionFacade.run_encounter(up, db, {"zone_id": "zone_prog1", "encounter_index": 0})
+	_check(not ru.has("errors") and int(ru["new_state"]["player_level"]) == 2,
+			"xp: crossing the threshold levels up")
+	_check(not ru.has("errors") and int(ru["new_state"]["exp"]) == 0,
+			"xp: the threshold is consumed exactly, remainder carried")
+	if ru.has("errors"):
+		return
+	# 升级抬升初始属性集（AC6）：level 2 曲线 max_hp = 100 + 20 = 120。
+	var q := SessionFacade.query_stats(ru["new_state"], db)
+	_check(not q.has("errors") and float(q["stats"]["max_hp"]) == 120.0,
+			"xp: the leveled-up state aggregates lifted base stats (max_hp 120)")
+
+	# 连升两级：230 + 10 = 240 -> -100 = 140 >= 门槛(2) 140 -> level 3，余 0。
+	var cascade := {"player_level": 1, "exp": 230, "equipment": {"weapon": blade}, "skills": []}
+	var rc := SessionFacade.run_encounter(cascade, db,
+			{"zone_id": "zone_prog1", "encounter_index": 0})
+	_check(not rc.has("errors") and int(rc["new_state"]["player_level"]) == 3,
+			"xp: a big pool cascades through multiple levels")
+	_check(not rc.has("errors") and int(rc["new_state"]["exp"]) == 0,
+			"xp: each intermediate threshold is consumed in turn")
+
+	# 经验随有效等级抬升：tier 1 的 eff = 11 -> 一杀 110（不升级：110 < 门槛(2) 140）。
+	var t1 := {"player_level": 2, "equipment": {"weapon": blade}, "skills": [],
+			"unlocked": {"max_zone_order": 1, "zone_tiers": {"zone_prog1": 1}}}
+	var rt := SessionFacade.run_encounter(t1, db,
+			{"zone_id": "zone_prog1", "encounter_index": 0, "tier": 1})
+	_check(not rt.has("errors") and int(rt["new_state"]["exp"]) == 110
+			and int(rt["new_state"]["player_level"]) == 2,
+			"xp: an eff-level-11 kill banks 110 exp (proportional to the effective level)")
+
+
+## AC4/AC5/AC8：首领胜解锁与锚推进、失败回退（非起点退区域起点、起点再败退上一
+## 区域起点、首领败同规则）、回退落点可赢（永不挂起）、set_idle_spot 合法性与
+## next_ref 的锚出发 / 走图前移 / 拒绝坏输入。
+func _run_prog_fallback(tmp: String) -> void:
+	var db := _load_db(_write_fb_db(tmp.path_join("prog_fb")))
+	_check(db.errors.is_empty(), "fallback fixture loads with zero errors")
+	if not db.errors.is_empty():
+		return
+	var blade := {"base": "base_mini_blade", "affixes": []}
+	var ring := {"base": "base_prog_ring", "affixes": []}
+	var eq := {"player_level": 1, "equipment": {"weapon": blade}, "skills": []}
+	# 装备链清 zone_fb1（第 0 场、第 1 场、首领）-> 解锁 fb2 + tier 1 + 锚推进。
+	var s := eq
+	for step in [{"zone_id": "zone_fb1", "encounter_index": 0},
+			{"zone_id": "zone_fb1", "encounter_index": 1},
+			{"zone_id": "zone_fb1", "encounter_index": -1}]:
+		var rs := SessionFacade.run_encounter(s, db, step)
+		_check(not rs.has("errors") and String(rs.get("result", "")) == "win",
+				"fallback: equipped clear step wins")
+		if rs.has("errors") or String(rs.get("result", "")) != "win":
+			return
+		s = rs["new_state"]
+	_check(String(s["idle_spot"]["zone_id"]) == "zone_fb2" and int(s["idle_spot"]["tier"]) == 0,
+			"fallback: first clear of zone_fb1 anchors the walk at zone_fb2")
+	_check(int(s["unlocked"]["zone_tiers"]["zone_fb1"]) == 1,
+			"fallback: zone_fb1 tier 1 is unlocked by the boss kill")
+
+	# 裸装（继承解锁游标，戴环保证零暴击）在 zone_fb2 第 0 场败给双 mook：
+	# 先杀一只再倒下 —— 败场也入账击杀经验。
+	var naked := {"player_level": 1, "equipment": {"trinket": ring}, "skills": [],
+			"unlocked": s["unlocked"]}
+	var rl := SessionFacade.run_encounter(naked, db, {"zone_id": "zone_fb2", "encounter_index": 0})
+	_check(not rl.has("errors") and String(rl.get("result", "")) == "lose",
+			"fallback: the naked player loses the zone_fb2 opener")
+	if rl.has("errors") or String(rl.get("result", "")) != "lose":
+		return
+	var nsl: Dictionary = rl["new_state"]
+	_check(String(nsl["idle_spot"]["zone_id"]) == "zone_fb1" and int(nsl["idle_spot"]["tier"]) == 0,
+			"fallback: losing at a zone start retreats to the previous zone start (AC4)")
+	_check(int(nsl["exp"]) == 20,
+			"fallback: the losing run still banks its kill's exp (1 mook x eff level 2)")
+	var nr := SessionFacade.next_ref(nsl, db,
+			{"zone_id": "zone_fb2", "encounter_index": 0, "tier": 0}, "lose")
+	_check(not nr.has("errors") and String(nr["ref"]["zone_id"]) == "zone_fb1"
+			and int(nr["ref"]["encounter_index"]) == 0 and int(nr["ref"]["tier"]) == 0,
+			"fallback: next_ref re-enters through the anchor after a loss")
+	# 回退落点可赢（永不挂起）：fb1 第 0 场裸装必胜。
+	var rw := SessionFacade.run_encounter(naked, db, {"zone_id": "zone_fb1", "encounter_index": 0})
+	_check(not rw.has("errors") and String(rw.get("result", "")) == "win",
+			"fallback: the retreat landing is winnable again (never stuck)")
+
+	# 非起点败 -> 当前区域起点（同阶）：fb1 tier 1 第 1 场。
+	var rl1 := SessionFacade.run_encounter(naked, db,
+			{"zone_id": "zone_fb1", "encounter_index": 1, "tier": 1})
+	_check(not rl1.has("errors") and String(rl1.get("result", "")) == "lose",
+			"fallback: the naked player also loses the tier-1 killer fight")
+	if rl1.has("errors") or String(rl1.get("result", "")) != "lose":
+		return
+	var nsl1: Dictionary = rl1["new_state"]
+	_check(String(nsl1["idle_spot"]["zone_id"]) == "zone_fb1"
+			and int(nsl1["idle_spot"]["tier"]) == 1,
+			"fallback: a mid-zone loss retreats to the zone start at the same tier")
+	var nr1 := SessionFacade.next_ref(nsl1, db,
+			{"zone_id": "zone_fb1", "encounter_index": 1, "tier": 1}, "lose")
+	_check(not nr1.has("errors") and int(nr1["ref"]["encounter_index"]) == 0
+			and int(nr1["ref"]["tier"]) == 1,
+			"fallback: next_ref restarts the same-tier zone walk after a mid-zone loss")
+
+	# 首领败 -> 当前区域起点（首领也是遭遇，AC4 不豁免）。
+	var rbl := SessionFacade.run_encounter(naked, db,
+			{"zone_id": "zone_fb1", "encounter_index": -1})
+	_check(not rbl.has("errors") and String(rbl.get("result", "")) == "lose",
+			"fallback: the naked player loses to the boss")
+	if rbl.has("errors") or String(rbl.get("result", "")) != "lose":
+		return
+	var nsb: Dictionary = rbl["new_state"]
+	_check(String(nsb["idle_spot"]["zone_id"]) == "zone_fb1" and int(nsb["idle_spot"]["tier"]) == 0,
+			"fallback: a boss loss retreats to the zone start like any failed encounter")
+
+	# set_idle_spot（AC5）：限已解锁；next_ref 空历史时以锚出发（重启 = 清单头）。
+	var fresh := {"player_level": 1, "equipment": {}, "skills": []}
+	_check(SessionFacade.set_idle_spot(fresh, db, "zone_fb2", 0).has("errors"),
+			"idle spot: a locked zone is refused")
+	_check(SessionFacade.set_idle_spot(fresh, db, "zone_fb1", 1).has("errors"),
+			"idle spot: a locked tier is refused")
+	_check(SessionFacade.set_idle_spot(fresh, db, "no_such_zone", 0).has("errors"),
+			"idle spot: an unknown zone is refused")
+	var spot := SessionFacade.set_idle_spot(fresh, db, "zone_fb1", 0)
+	_check(not spot.has("errors")
+			and String(spot["state"]["idle_spot"]["zone_id"]) == "zone_fb1"
+			and int(spot["state"]["idle_spot"]["tier"]) == 0,
+			"idle spot: a legal choice is written into the state")
+	var na := SessionFacade.next_ref(spot["state"], db, {}, "")
+	_check(not na.has("errors") and String(na["ref"]["zone_id"]) == "zone_fb1"
+			and int(na["ref"]["encounter_index"]) == 0 and int(na["ref"]["tier"]) == 0,
+			"idle spot: a fresh session anchors at the chosen spot")
+	var spot2 := SessionFacade.set_idle_spot(naked, db, "zone_fb2", 0)
+	_check(not spot2.has("errors")
+			and String(spot2["state"]["idle_spot"]["zone_id"]) == "zone_fb2",
+			"idle spot: unlocked zones can be chosen freely (old spots included)")
+
+	# next_ref 走图：胜则前移、清单尾转首领、坏输入拒绝。
+	var w0 := SessionFacade.next_ref(spot["state"], db,
+			{"zone_id": "zone_fb1", "encounter_index": 0, "tier": 0}, "win")
+	_check(not w0.has("errors") and int(w0["ref"]["encounter_index"]) == 1,
+			"next_ref: a win advances the walk")
+	var w1 := SessionFacade.next_ref(spot["state"], db,
+			{"zone_id": "zone_fb1", "encounter_index": 1, "tier": 0}, "win")
+	_check(not w1.has("errors") and int(w1["ref"]["encounter_index"]) == -1,
+			"next_ref: the list tail hands over to the boss")
+	var bad := SessionFacade.next_ref(spot["state"], db, {}, "draw")
+	_check(bad.has("errors"), "next_ref: an unknown last_result is refused")
+	var bad2 := SessionFacade.next_ref(spot["state"], db,
+			{"zone_id": "no_such_zone", "encounter_index": 0}, "win")
+	_check(bad2.has("errors"), "next_ref: an unknown last_ref zone is refused")
+
+
+## AC1/AC8 补充：链顶首通爬阶（无下一区域时）、重刷旧首领不挪锚不解锁（max 语义，
+## 回头刷旧区域成立）、next_ref 首领胜后按锚重出发；下游接缝（#38 存档票）：
+## new_state 的进度字段经 JSON 往返后原样再战。
+func _run_prog_chain_top(tmp: String) -> void:
+	var db := _load_db(_write_prog_db(tmp.path_join("prog_top")))
+	_check(db.errors.is_empty(), "chain-top fixture loads with zero errors")
+	if not db.errors.is_empty():
+		return
+	var blade := {"base": "base_mini_blade", "affixes": []}
+	var s := {"player_level": 1, "equipment": {"weapon": blade}, "skills": []}
+	var steps := [
+		{"zone_id": "zone_prog1", "encounter_index": -1},
+		{"zone_id": "zone_prog2", "encounter_index": -1},
+		{"zone_id": "zone_prog3", "encounter_index": -1},
+	]
+	var expected_zone := ["zone_prog2", "zone_prog3", "zone_prog3"]
+	var expected_tier := [0, 0, 1]
+	for i in steps.size():
+		var rs := SessionFacade.run_encounter(s, db, steps[i])
+		_check(not rs.has("errors") and String(rs.get("result", "")) == "win",
+				"chain: boss %d falls" % i)
+		if rs.has("errors") or String(rs.get("result", "")) != "win":
+			return
+		s = rs["new_state"]
+		_check(String(s["idle_spot"]["zone_id"]) == String(expected_zone[i])
+				and int(s["idle_spot"]["tier"]) == int(expected_tier[i]),
+				"chain: the anchor follows the first clear (step %d)" % i)
+	_check(int(s["unlocked"]["zone_tiers"]["zone_prog3"]) == 1,
+			"chain: the chain-top boss win unlocks tier 1 (no next zone to open)")
+
+	# 重刷旧首领：无新解锁 -> 解锁游标与锚都不动。
+	var refarm := SessionFacade.run_encounter(s, db,
+			{"zone_id": "zone_prog1", "encounter_index": -1})
+	_check(not refarm.has("errors") and String(refarm.get("result", "")) == "win",
+			"chain: the old tier-0 boss re-farm wins")
+	if refarm.has("errors") or String(refarm.get("result", "")) != "win":
+		return
+	var ns: Dictionary = refarm["new_state"]
+	_check(int(ns["unlocked"]["max_zone_order"]) == 4,
+			"chain: re-farm keeps the unlock cursor (max semantics; p3 boss wrote order+1 = 4)")
+	_check(int(ns["unlocked"]["zone_tiers"]["zone_prog1"]) == 1,
+			"chain: re-farm keeps the unlocked tier (max semantics)")
+	_check(String(ns["idle_spot"]["zone_id"]) == "zone_prog3" and int(ns["idle_spot"]["tier"]) == 1,
+			"chain: re-farm never moves the anchor (the chosen farm sticks)")
+	var nr := SessionFacade.next_ref(ns, db,
+			{"zone_id": "zone_prog1", "encounter_index": -1, "tier": 0}, "win")
+	_check(not nr.has("errors") and String(nr["ref"]["zone_id"]) == "zone_prog3"
+			and int(nr["ref"]["tier"]) == 1 and int(nr["ref"]["encounter_index"]) == 0,
+			"chain: next_ref after a boss win re-enters through the anchor")
+
+	# 下游接缝（#38 存档票）：new_state 必须是完整 JSON-able 深拷贝——进度字段
+	# 经 JSON 往返后原样再战（宽接收自证：JSON 数字回读 float）。
+	var snap = JSON.parse_string(JSON.stringify(ns))
+	_check(snap is Dictionary and snap.has("unlocked") and snap.has("idle_spot")
+			and snap.has("exp") and snap.has("inventory"),
+			"seam: the new_state JSON round-trip carries the progression fields")
+	var rerun := SessionFacade.run_encounter(snap, db,
+			{"zone_id": "zone_prog3", "encounter_index": 0, "tier": 1})
+	_check(not rerun.has("errors") and String(rerun.get("result", "")) == "win",
+			"seam: the round-tripped state fights on (JSON-able deep copy)")

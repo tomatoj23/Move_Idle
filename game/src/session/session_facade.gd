@@ -12,8 +12,8 @@ extends RefCounted
 ## 纯等级（level >= unlock_level 即可装配，无任何额外系统，build-system #2.3）。
 ## #32 增量：击杀是唯一掉落入口——遭遇模拟结束后按事件流顺序逐条 on_kill 走
 ## LootRoller 三层判定链（掉不掉 → 稀有度 → 实例生成），命中即在所属 on_kill
-## 之后追加 drop 事件（在线/离线同规则）；ilvl 锚 = 区域等级（难度阶偏移归进度票，
-## progression-structure §3）。
+## 之后追加 drop 事件（在线/离线同规则）；ilvl 锚 = 有效等级（区域 level + 阶 ×
+## 步长；难度阶已随 #34 落地，progression-structure §3）。
 ## #33 增量：背包进状态（inventory = 装备实例数组，入包序，无上限、只进不出，
 ## CONTEXT「背包」）。掉落 roll 时机沿用 #32 裁量（遭遇完结后统一补 roll），完结时
 ## 把全部 drop 实例按流序入包随 new_state 返回——「掉落事件发生即入包」
@@ -25,11 +25,26 @@ extends RefCounted
 ## 调用按传入的新状态重新聚合——怪血量、相位、技能冷却与 RNG 流跨切片连续，
 ## 当前遭遇不中断。query_stats = 聚合属性面板数据，与战斗共用同一条状态校验与
 ## 聚合路径（面板与战斗同源；编辑器「装备试算面板」同函数异端，inventory-equipment
-## §4）。排序与筛选是纯表现层，本层不提供也不感知。进度推进、离线补算、落盘由
-## 后续票接入；遭遇内血量瞬态不入档——「遭遇间玩家回满」由每场从满血起算直接成立。
+## §4）。排序与筛选是纯表现层，本层不提供也不感知。离线补算、落盘由后续票接入
+## （进度推进已随 #34 落地，见下）；遭遇内血量瞬态不入档——「遭遇间玩家回满」
+## 由每场从满血起算直接成立。
+## #34 增量：进度结构进状态——unlocked（max_zone_order + zone_tiers）与 idle_spot
+## （挂机点锚）为持久化字段，exp 入账与升级发生在遭遇边界（save-persistence §4）。
+## 难度阶：ref.tier 把怪物基准 stats × 难度阶乘数^tier（全属性统一缩放的字面口径，
+## 缩放公式归 Progression 常量），
+## 有效等级 = 区域 level + tier × 步长，即掉落 ilvl 与击杀经验的唯一锚（角色等级
+## 不参与，progression-structure §6）。解锁门拒绝未解锁的区域 / 阶，绝不放行越级
+## 战斗。首领胜 = 两维解锁（order+1 区域、tier+1 阶）+ 首通时挂机点沿链自动推进
+## （先区域链、链顶爬阶；无新解锁不挪锚——回头刷旧区域由此成立）；遭遇失败的
+## 回退落点即挂机点（非起点退当前区域起点，起点再败退上一区域起点第 0 阶，
+## 永不挂起）。next_ref = 在线走图决策（纯读）；set_idle_spot = 玩家自选挂机点
+## （限已解锁）。种子部件不含 tier：同输入必得同事件流在任意固定 tier 下成立。
+## 对 #39 离线票的接缝：离线补算必须把 new_state 的 unlocked / idle_spot 还原为
+## 会话前取值（「离线不推进、不写解锁」由离线结算票保证），经验 / 掉落照常入账。
 ## 确定性：种子从**完整输入**派生（区域、遭遇、等级、技能装配、装备形状）——
 ## 同输入必得同事件流；同关同级不同 build 不共享随机序列。背包不在种子部件里
-## （掉落入包不扰动后续战斗）。
+## （掉落入包不扰动后续战斗）；tier 也不在部件里（同输入在固定 tier 下必得同流，
+## 见上 #34 注）。
 
 const TICK_MS := 100  # 引擎常量：tick 间隔，集中管理点（#24 引擎常量条款）
 const BOSS_ENCOUNTER := -1  # encounter_index 哨兵：首领固定单挑（multi-monster-encounters #1）
@@ -124,11 +139,15 @@ static func run_encounter(state: Dictionary, content_db: ContentDB, ref: Diction
 	for e in looted["events"]:
 		if String(e.get("type", "")) == "drop":
 			banked.append(e["instance"])
+	var next_state := _state_with_drops_banked(state, banked)
+	# 遭遇边界的进度结算（#34）：经验入账 + 首领解锁/锚推进 + 失败回退锚。
+	# 写入的是深拷贝 new_state，输入状态永不改写。
+	_with_progression(next_state, content_db, prep, String(sim["result"]), events)
 	return {
 		"result": String(sim["result"]),
 		"duration_ticks": int(sim["duration_ticks"]),
 		"events": looted["events"],
-		"new_state": _state_with_drops_banked(state, banked),
+		"new_state": next_state,
 	}
 
 
@@ -209,6 +228,74 @@ static func query_stats(state: Dictionary, content_db: ContentDB) -> Dictionary:
 	if v["errors"].size() > 0:
 		return {"errors": v["errors"]}
 	return {"stats": StatAggregator.aggregate(content_db.attributes, v["level"], v["equipped"])}
+
+
+## AC5：玩家自选挂机点（区域 + 难度阶），限已解锁（progression-structure §5）。
+## 纯状态操作：只写 idle_spot，不触碰战斗轴（技能 / 穿戴 / 背包互不影响），也不
+## 复检整个状态——挂机点不参与战斗校验，指向非法内容的锚会在 run_encounter 的
+## 进度门被拒绝。解锁判定与 _prepare 同一条默认值路径（缺 unlocked = 新档）。
+static func set_idle_spot(state: Dictionary, content_db: ContentDB, zone_id: String,
+		tier: int) -> Dictionary:
+	var errors := PackedStringArray()
+	var zone = content_db.zones.get(zone_id)
+	if zone == null:
+		errors.append("unknown zone id: %s" % zone_id)
+	if tier < 0:
+		errors.append("tier must be >= 0, got %d" % tier)
+	errors = _check_unlock_gate(errors, state, content_db, zone_id, zone, tier)
+	if errors.size() > 0:
+		return {"errors": errors}
+	var next_state: Dictionary = state.duplicate_deep(Resource.DeepDuplicateMode.DEEP_DUPLICATE_ALL)
+	next_state["idle_spot"] = {"zone_id": zone_id, "tier": tier}
+	return {"state": next_state}
+
+
+## AC1/AC4/AC8：在线走图决策（纯读，不写状态）。last_ref = {} 或 last_result 非
+## "win" = 从挂机点锚出发（区域遭遇清单头，tier 取锚的阶）——首领胜的首通推进与
+## 失败的回退锚已由 run_encounter 写入 new_state，本函数只按锚重出发；上一步是
+## 普通遭遇且胜 → 走图前移（清单尾则首领，同区同阶）。返回
+## {"ref": {"zone_id", "encounter_index", "tier"}} 或 {"errors": PackedStringArray}。
+## 走图位置是瞬态不入档：重启 = 本函数以空 last_ref 从锚重出发（save-persistence §3）。
+static func next_ref(state: Dictionary, content_db: ContentDB, last_ref: Dictionary,
+		last_result: String) -> Dictionary:
+	var errors := PackedStringArray()
+	if last_result != "win" and last_result != "lose" and last_result != "":
+		errors.append("unknown last_result: %s (expected win|lose|\"\")" % last_result)
+	var spot: Dictionary = {}
+	if state.get("idle_spot") is Dictionary and not (state["idle_spot"] as Dictionary).is_empty():
+		spot = state["idle_spot"]
+	else:
+		spot = Progression.default_idle_spot(content_db.zones)
+	if spot.is_empty() or not content_db.zones.has(String(spot.get("zone_id", ""))):
+		errors.append("idle spot points at no known zone: %s" % str(spot.get("zone_id", "")))
+	if errors.size() > 0:
+		return {"errors": errors}
+	var anchor := {
+		"zone_id": String(spot["zone_id"]),
+		"encounter_index": 0,
+		"tier": int(spot.get("tier", 0)),
+	}
+	if last_ref.is_empty() or last_result != "win":
+		return {"ref": anchor}
+	var zone_id := String(last_ref.get("zone_id", ""))
+	var zone = content_db.zones.get(zone_id)
+	if zone == null:
+		return {"errors": PackedStringArray(["unknown last_ref zone: %s" % zone_id])}
+	var index := int(last_ref.get("encounter_index", 0))
+	if index == BOSS_ENCOUNTER:
+		return {"ref": anchor}
+	if index < 0:
+		return {"errors": PackedStringArray(["bad last_ref encounter index: %d" % index])}
+	var encounters: Array = zone["encounters"]
+	if index >= encounters.size():
+		# 越界下标是上游 bug（run_encounter 拒收越界 ref，正常循环到不了这里）——
+		# 拒绝而不是静默升格成首领，「绝不静默给结果」的接缝契约。
+		return {"errors": PackedStringArray(["last_ref encounter index out of range: %d" % index])}
+	if index + 1 < encounters.size():
+		return {"ref": {"zone_id": zone_id, "encounter_index": index + 1,
+				"tier": int(last_ref.get("tier", 0))}}
+	return {"ref": {"zone_id": zone_id, "encounter_index": BOSS_ENCOUNTER,
+			"tier": int(last_ref.get("tier", 0))}}
 
 
 ## 状态侧校验（等级 + 技能装配 + 穿戴实例），战斗与面板共用同一条执法路径。
@@ -327,11 +414,17 @@ static func _prepare(state: Dictionary, content_db: ContentDB, ref: Dictionary) 
 	var v := _validate_state(state, content_db)
 	var errors: PackedStringArray = v["errors"]
 
-	# 遭遇解析：-1 = 首领单挑；普通遭遇下标越界即错
+	# 遭遇解析：-1 = 首领单挑；普通遭遇下标越界即错。
 	var zone_id := String(ref.get("zone_id", ""))
 	var zone = content_db.zones.get(zone_id)
 	if zone == null:
 		errors.append("unknown zone id: %s" % zone_id)
+	var tier := int(ref.get("tier", 0))
+	if tier < 0:
+		errors.append("tier must be >= 0, got %d" % tier)
+	# 进度门（#34）：区域与难度阶都必须已解锁，绝不放行越级战斗。只读视图，
+	# 缺字段按新档默认值（最早区域 / 第 0 阶）——不写回输入状态。
+	errors = _check_unlock_gate(errors, state, content_db, zone_id, zone, tier)
 	var monsters_spec: Array = []
 	var encounter_index := int(ref.get("encounter_index", 0))
 	if zone != null:
@@ -344,6 +437,12 @@ static func _prepare(state: Dictionary, content_db: ContentDB, ref: Dictionary) 
 			else:
 				monsters_spec = [encounters[encounter_index]]
 
+	# 难度阶（#34 AC3）：怪物基准 stats × 难度阶乘数^tier（scale_stats 返回新字典，
+	# 内容库基准记录只读不改写）；有效等级 = 区域 level + tier × 步长，是掉落
+	# ilvl 与击杀经验的唯一锚（progression-structure §3/§6）。
+	var eff_level := 0
+	if zone != null:
+		eff_level = Progression.effective_level(int(zone["level"]), tier)
 	var mons: Array = []
 	var monster_of_display := {}  # 站位 id -> 怪物 id（掉落 roll 要认出死的是哪只怪）
 	for spec in monsters_spec:
@@ -356,7 +455,7 @@ static func _prepare(state: Dictionary, content_db: ContentDB, ref: Dictionary) 
 		for i in count:
 			var display_id := String(mrec["id"]) if count == 1 else "%s#%d" % [String(mrec["id"]), i + 1]
 			monster_of_display[display_id] = String(mrec["id"])
-			mons.append({"id": display_id, "stats": mrec["stats"]})
+			mons.append({"id": display_id, "stats": Progression.scale_stats(mrec["stats"], tier)})
 
 	return {
 		"errors": errors,
@@ -366,10 +465,12 @@ static func _prepare(state: Dictionary, content_db: ContentDB, ref: Dictionary) 
 		"fx": v["fx"],
 		"zone_id": zone_id,
 		"encounter_index": encounter_index,
+		"tier": tier,
+		"eff_level": eff_level,
 		"mons": mons,
 		"monster_of_display": monster_of_display,
 		"is_leader": encounter_index == BOSS_ENCOUNTER,
-		"ilvl": int(zone["level"]) if zone != null else 0,
+		"ilvl": eff_level,
 	}
 
 
@@ -472,3 +573,120 @@ static func _with_drops(events: Array, monster_of_display: Dictionary, is_leader
 		if bool(drop["dropped"]):
 			out.append({"type": "drop", "monster": monster_id, "instance": drop["instance"]})
 	return {"events": out, "errors": errs}
+
+
+# ---------------------------------------------------------------- #34 progression
+
+## 遭遇边界的进度结算（AC1/2/4/5/6/8）：进度字段形状归一化 → 击杀经验入账
+## （胜负皆入账——击杀即经验）→ 首领胜的两维解锁与挂机点首通推进 → 失败的回退锚。
+## 只写 next_state（深拷贝）；本路径不产生拒绝性错误，内容合法性已由 _prepare 把关。
+static func _with_progression(next_state: Dictionary, content_db: ContentDB,
+		prep: Dictionary, result: String, events: Array) -> void:
+	_norm_progression(next_state, content_db)
+	Progression.bank_kills(next_state, _kill_count(events), int(prep["eff_level"]))
+	if result == "win" and bool(prep["is_leader"]):
+		_advance_anchor_after_boss(next_state, content_db, prep)
+	elif result == "lose":
+		_fallback_anchor(next_state, content_db, prep)
+
+
+## 首领胜：解锁 order+1 区域与 tier+1（max 语义——重打不清零、不回退）；首通
+## （本次产生新解锁）时挂机点沿链自动推进：先区域链（推进 = 依次打通区域，
+## progression-structure §1），链顶才爬阶；无新解锁（重刷旧首领）不挪锚——
+## 挂机点停在玩家自选处，回头刷旧区域由此成立（§5）。
+static func _advance_anchor_after_boss(next_state: Dictionary, content_db: ContentDB,
+		prep: Dictionary) -> void:
+	var zones: Dictionary = content_db.zones
+	var zone_id := String(prep["zone_id"])
+	var order := int(zones[zone_id]["order"])
+	var tier := int(prep["tier"])
+	var unlocked: Dictionary = next_state["unlocked"]
+	var zone_tiers: Dictionary = unlocked["zone_tiers"]
+	var max_before := int(unlocked["max_zone_order"])
+	var tier_before := int(zone_tiers.get(zone_id, 0))
+	unlocked["max_zone_order"] = maxi(max_before, order + 1)
+	zone_tiers[zone_id] = maxi(tier_before, tier + 1)
+	var next_zone := Progression.zone_by_order(zones, order + 1)
+	if next_zone != "" and max_before < order + 1:
+		next_state["idle_spot"] = {"zone_id": next_zone, "tier": 0}
+	elif tier_before < tier + 1:
+		next_state["idle_spot"] = {"zone_id": zone_id, "tier": tier + 1}
+
+
+## 失败回退（AC4，永不挂起）：非起点遭遇（含首领）失败退当前区域起点重刷（同阶）；
+## 当前区域起点（普通第 0 场）再败退上一区域起点并落回第 0 阶——上一区域的高阶
+## 未必已解锁，第 0 阶恒合法且必然已被打通（区域解锁链逐级指向它）；链底没有
+## 上一区域就原地重试。回退落点即挂机点（progression-structure §5）：锚跟随回退，
+## 「挂机点永远可赢」由回退规则保证。
+static func _fallback_anchor(next_state: Dictionary, content_db: ContentDB,
+		prep: Dictionary) -> void:
+	var zones: Dictionary = content_db.zones
+	var zone_id := String(prep["zone_id"])
+	var landing := {"zone_id": zone_id, "tier": int(prep["tier"])}
+	if int(prep["encounter_index"]) == 0 and not bool(prep["is_leader"]):
+		var prev := Progression.zone_by_order(zones, int(zones[zone_id]["order"]) - 1)
+		if prev != "":
+			landing = {"zone_id": prev, "tier": 0}
+	next_state["idle_spot"] = landing
+
+
+## 进度字段形状归一化（save-persistence §8 前向兼容：缺字段补默认值）。只作用于
+## new_state 深拷贝；unlocked / exp / idle_spot 缺失即按新档默认补齐，存档票拿到
+## 的状态恒为完整形状。非法形状（unlocked 不是字典等）同样归一化为默认——
+## 内容引用的合法性由 run_encounter 的进度门按最终值执法。
+static func _norm_progression(next_state: Dictionary, content_db: ContentDB) -> void:
+	if not (next_state.get("unlocked") is Dictionary):
+		next_state["unlocked"] = Progression.default_unlocked(content_db.zones)
+	var unlocked: Dictionary = next_state["unlocked"]  # 深拷贝产物，写入安全
+	if not (unlocked.get("zone_tiers") is Dictionary):
+		unlocked["zone_tiers"] = {}
+	if not unlocked.has("max_zone_order"):
+		unlocked["max_zone_order"] = Progression.min_zone_order(content_db.zones)
+	if not next_state.has("exp"):
+		next_state["exp"] = 0
+	if not (next_state.get("idle_spot") is Dictionary) \
+			or (next_state["idle_spot"] as Dictionary).is_empty():
+		next_state["idle_spot"] = Progression.default_idle_spot(content_db.zones)
+
+
+## 解锁游标只读视图：缺字段按新档默认值补齐，绝不写回输入状态（门面的一切状态
+## 写入只发生在 new_state 深拷贝上）。_prepare / set_idle_spot / 进度门共用。
+static func _unlocked_view(state: Dictionary, content_db: ContentDB) -> Dictionary:
+	var src: Dictionary = {}
+	if state.get("unlocked") is Dictionary:
+		src = state["unlocked"]
+	var zone_tiers: Dictionary = {}
+	if src.get("zone_tiers") is Dictionary:
+		zone_tiers = src["zone_tiers"]
+	var max_order := Progression.min_zone_order(content_db.zones)
+	if src.has("max_zone_order"):
+		max_order = int(src["max_zone_order"])
+	return {"max_zone_order": max_order, "zone_tiers": zone_tiers}
+
+
+## 解锁门（#34 AC1/AC2/AC5 执法点）：区域与难度阶都必须已解锁，绝不放行越级
+## 战斗 / 锚选择。errors 以返回值传出（PackedStringArray 是值类型，就地追加不出
+## 函数）；zone 可为 null（unknown zone 的报错由调用方负责）；缺 unlocked 字段
+## 按新档默认值。战斗路径与挂机点选择共用同一条执法与同一套文案。
+static func _check_unlock_gate(errors: PackedStringArray, state: Dictionary,
+		content_db: ContentDB, zone_id: String, zone, tier: int) -> PackedStringArray:
+	var unlocked := _unlocked_view(state, content_db)
+	var max_order := int(unlocked["max_zone_order"])
+	var zone_tiers: Dictionary = unlocked["zone_tiers"]
+	if zone != null and int(zone["order"]) > max_order:
+		errors.append("zone %s is locked (order %d > max unlocked order %d)"
+				% [zone_id, int(zone["order"]), max_order])
+	if zone != null and tier > int(zone_tiers.get(zone_id, 0)):
+		errors.append("tier %d of zone %s is locked (max unlocked tier %d)"
+				% [tier, zone_id, int(zone_tiers.get(zone_id, 0))])
+	return errors
+
+
+## 击杀数 = 事件流里 victim 非玩家的 on_kill 条数（玩家是唯一击杀方：直杀、
+## proc 与爆炸连锁都算玩家战果；玩家倒下的那条不是击杀）。
+static func _kill_count(events: Array) -> int:
+	var n := 0
+	for e in events:
+		if String(e.get("type", "")) == "on_kill" and String(e.get("victim", "")) != PLAYER_ID:
+			n += 1
+	return n
