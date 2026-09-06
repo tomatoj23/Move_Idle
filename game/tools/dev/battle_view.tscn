@@ -1,0 +1,6 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://tools/dev/battle_view.gd" id="1_1dabl"]
+
+[node name="BattleView" type="Node2D" unique_id=802684531]
+script = ExtResource("1_1dabl")
