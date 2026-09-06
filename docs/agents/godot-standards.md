@@ -45,6 +45,14 @@
 - **测试绿 ≠ 符合新版规范**：用旧 API 写的测试也能绿——测试只证明"行为符合断言预期"，不证明"方案是新版最优路径"，后者仍靠策展对照。
 - 测试框架选型（GUT / gdUnit4）是规划类决策：先查框架对本引擎版本的兼容声明。
 
+### 断言质量（防「没崩」型假绿）
+
+- **退化样本 = 假证据**：从采样里挑样本须显式筛掉退化个体（如 0 词缀的普通档），否则断言只剩「没崩」。
+- **从载荷重推导时先把乘算类来源单独分流**：传奇 `stat_amp`、两阶段「先加算后乘算」都不在 `values` 里，漏掉会把正确实现误判成 bug（实测：期望 11 / 实测 14）。
+- **不符先 DIAG 打印载荷对照再动手**，别急改引擎。
+- **统计 / 分布断言靠加大样本量换余量，不靠放宽容差**：N=120 时占比 .300 vs 期望 .400 只剩 23% 余量，N=240 后全舒适。
+- `--script` 模式下 `_initialize` 时 root 尚未进树，`add_child` 不触发 `_ready`（依赖 `_ready` 的初始化在校验脚本里不成立）。
+
 ## 硬规则清单（GDScript 视角，标引入版本）
 
 ### GDScript / Core
@@ -59,6 +67,16 @@
 - 多人 RPC 配置方法叫 `get_node_rpc_config`。（4.5 更名）
 - `FileAccess.get_as_text()` 无参调用；`skip_cr` 参数已删。（4.6）
 - 属性枚举迁移：`EDITOR_SCENE_FORMAT_IMPORTER_*` → `ImportFlags`；`ImageUpdateMask.UPDATE_WIDTH_IN_PERCENT` → `UPDATE_WIDTH_UNIT`。（4.7）
+
+### GDScript 语言坑（实测，非版本变更）
+
+- `dict["missing"]` 访问缺失键是**运行时错误**（不是返回 null）：遍历异构载荷先按 type 分流再取键，或用 `.get()`。
+- `while true:` 所有路径都 return 仍报「Not all code paths return a value」→ 循环后补不可达 `return`。
+- `Array.filter()` 对 Variant 表达式（如 `r["events"]`）无法类型推断 → 显式 `var x: Array = ...filter(...)`。
+- `const X: Array = OtherClass.CONST` 跨类引用可用（单一真相去重复）。
+- `JSON.parse_string` 数字全回读 float，整型字段校验须宽接收；`JSON.stringify(Vector2)` 丢类型，入档显式 `{x, y}`。
+- `PackedStringArray` 无 `pop_back()`（那是 `Array` 的 API）。
+- 浮点边界：作除数的常量选可精确表示的值（如 `0.75`）；`10 / 0.8` 落在 .5 附近会让 `roundi` 的 interval 判定歧义。
 
 ### 2D
 
@@ -95,7 +113,7 @@
 
 - 本文件只列**会改变写法的规则**。完整变更清单（含 C# 条目、3D/XR/网络子系统）在 research doc——**扩展新子系统（3D、多人、XR、C#、Web）前，先读其对应分组**。
 - 本文件与 research doc 均为缓存与加速器；API 最终形态的权威只有锁定版 class reference。
-- 已知未覆盖盲区（新资产类型首次落库前，按 `docs/agents/process-audit.md` 触发时机第 4 条实测再定执法方案）：`.gdshader`（shader 语言同样有版本演进，lint 与加载检查均不扫）；场景/资源旧属性漂移（`check_project.gd` 只 grep 错误不 grep 警告）；运行时序列化数据兼容（默认值/格式变更破坏旧存档，发布前关注）；本地引擎版本低于锁定版时 headless 校验是假绿信号（本地校验只是加速器，CI 才是裁决）。
+- 已知未覆盖盲区（新资产类型首次落库前，按 `docs/agents/process-audit.md` 开发内触发时机第 2 条实测再定执法方案）：`.gdshader`（shader 语言同样有版本演进，lint 与加载检查均不扫）；场景/资源旧属性漂移（`check_project.gd` 只 grep 错误不 grep 警告）；运行时序列化数据兼容（默认值/格式变更破坏旧存档，发布前关注）；本地引擎版本低于锁定版时 headless 校验是假绿信号（本地校验只是加速器，CI 才是裁决）。
 
 ## 机器执法（headless 校验）
 
@@ -105,7 +123,27 @@
 
     godot --headless --path game --script res://tools/validation/check_project.gd
 
-提交时另有 **pre-commit 钩子**（`.githooks/pre-commit`）自动跑同款反模式 lint，命中即拒绝提交。新克隆装机：`git config core.hooksPath .githooks`。
+提交时另有 **pre-commit 钩子**（`.githooks/pre-commit`）自动跑同款反模式 lint，命中即拒绝提交。新克隆装机：`git config core.hooksPath .githooks`（配置静默丢失 = lint 假绿，见「钩子装机自检」）。
+
+文档互引完整性另有一道（pre-commit 与 `.github/workflows/docs.yml` 同源）：`sh tools/check-doc-links.sh`，命中悬空的 `.md` 引用即红。文档重排 / 回滚后必跑。
+
+### 假绿模式（绿 ≠ 通过，必须二次判定）
+
+- `--script` 加载失败时引擎**静默退出 0**。判定通过须同时满足：①输出含校验器成功锚点 `CHECK OK`；②grep 不到 `SCRIPT ERROR`。二者缺一即视为失败。
+- `SCRIPT ERROR` 运行时错误**只中断所在函数 / section**，整体照常 exit 0、断言总数照常增长。实测：一个缺键 bug 静默跳过 11 条断言而总数仍达标 → 除「回归绿」外必须单独 grep `SCRIPT ERROR`；**按 section 统计断言条数**（每 section ≥10 条）是发现空样本最快的手段。
+- 校验器判定脚本是否健康时：坏脚本 `load()` 仍返回非 null，**权威判定用 `Script.reload()` 返回码**；对执行中的脚本调 reload 被引擎拒绝（校验器跳过自身；autoload 有存活实例同样被拒 → 改为读 `ProjectSettings autoload/*` 跳过）。
+- **本机（Windows）对「刚 rename / 刚落盘的文件」立即删除或改名会间歇失败**（杀毒软件锁文件），表现为校验步骤偶发报错，**零代码变更重跑即全绿**。判据 = 失败点漂移 + 重跑即通过 → 先重跑一次再诊断，不要当成回归。CI 在 Linux 不受影响；本地校验只是加速器，CI 才是裁决。
+
+### 新增脚本与校验顺序
+
+- 新增 `.gd`（尤其带 `class_name`）**必须先 `--import` 再跑 `--script`**：未导入 → 新 `class_name` 未注册 → `Parse Error: Identifier not declared` → 连锁 `Nonexistent function ...`，一次性吞掉整片断言（实测总数 289 掉到 33），极易误判成大面积回归。
+- `--import` 生成的 `.uid` 文件一并提交。
+- 本地顺序必须与 CI 一致（CI 同为「先 `--import` 后校验」），不要走出第二套顺序。
+
+### 钩子装机自检
+
+- 装机：`git config core.hooksPath .githooks`。`.git` 被外部工具动过后必须复查该配置与 `.git/hooks/` 残留旧钩子——配置静默丢失会让 lint **假绿**（grep 目标目录不存在时静默失败 exit 0，实测发生）。
+- 实弹验证钩子必须真实 commit：`--dry-run` 不执行钩子；钩子在跑的痕迹看 stderr。
 
 ## 查证入口
 

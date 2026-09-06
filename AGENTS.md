@@ -4,28 +4,48 @@
 
 ### Issue tracker
 
-Issues live in this repo's GitHub Issues (tomatoj23/Move_Idle), operated via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+Issues, specs, and the wayfinder map are GitHub issues; every operation goes through `gh` (issue create / read / list / comment / label / close, and the wayfinding steps: map, child, blocking, claim, resolve). See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 
-Five canonical triage-role labels; label string equals role name (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+Applying or reading a triage label: this repo's label string equals the role name. `docs/agents/triage-labels.md` holds the mapping if the two ever diverge.
 
 ### Domain docs
 
-Single-context layout: `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+Before exploring the codebase, and before any output that names a domain concept or revisits a recorded decision: `CONTEXT.md` (terms) + `docs/adr/` (decisions), both at the repo root — single-context layout. See `docs/agents/domain.md`.
 
 ### Design docs
 
-MVP design decisions index (task-based routing + issue-to-doc lookup + supersession notes): `docs/design/README.md`. Update the index whenever you revise any design doc.
+`docs/design/README.md` routes each implementation task to its owning design doc (task → doc, ticket → doc, plus supersessions). Read it before implementing or revising anything designed there; update it whenever you revise any design doc.
+
+### Content data conventions
+
+Reading or writing `content/` JSON, building content fixtures (especially a deliberately small affix pool), or touching drop / affix filter fields: a missing `allowed_slots` / `allowed_categories` matches everything, not nothing. See `docs/agents/content-data-conventions.md`.
 
 ### Godot 4.7 standards
 
-Engine pinned to 4.7.x (ADR-0001); agent training data is only reliable through Godot 4.4. When writing or reviewing GDScript/scenes/shaders, touching project settings or export presets, writing or revising any repo doc that references engine capabilities or APIs (design docs, ADRs, task plans, CONTEXT.md, research notes), using any API that may postdate 4.4, or fixing a red CI validation run: run the verification flow and hard rules in `docs/agents/godot-standards.md` before coding, or before finalizing those docs. Compliance constraints in that page outrank any task methodology (including skill-provided workflows). When handing a diff to a skill subagent (e.g. the code-review Standards axis), include `docs/agents/godot-standards.md` in the reference list you pass it.
+Engine pinned to 4.7.x; agent training data is only reliable through 4.4, so verify rather than recall. Before writing or reviewing GDScript / scenes / shaders, touching project settings or export presets, naming a specific API, property, or class in any repo doc (design docs, ADRs, task plans, `CONTEXT.md`, research notes), or diagnosing a red CI / headless validation run: run the verification flow and hard rules in `docs/agents/godot-standards.md`. Those constraints outrank any task methodology, including skill-provided workflows. Handing a diff to a skill subagent (e.g. the code-review Standards axis): pass that page in its reference list.
 
 ### Process audit
 
-The enforcement system itself is validated, not assumed: probe runs, session-export audits, and doc audits follow the runbooks in `docs/agents/process-audit.md` (triggers, checklists, failure-to-fix mapping).
+The enforcement system is itself validated, not assumed. When work hits a gap in the standards — a fact stated wrong, a lookup that took a wrong path, a pointer that failed to fire, a legal-but-suboptimal choice — and when CI / a compile / a pre-commit hook goes red, or the first instance of a new asset type (`.tscn` / `.tres` / `.gdshader` / `addons/`) lands: classify the miss and feed the fix back per `docs/agents/process-audit.md`. Out-of-band audit runbooks live behind that page.
 
 ### Cross-ticket discipline
 
-每票收尾必做两件事：①**跨票接缝**——本票产出物若会被下游票消费，加一条「下游消费路径」断言（不只验产出物形状），别让下游开工第一天撞格式墙；②**v1 裁量**（spec / 设计文档未钉的工程判断）三步走——实现时按裁量写、关票评论全文记录可否决理由、收尾回复里单列给用户拍板，同时进 `.codebuddy/memory/STATUS.md`。票尾复查清单：账目闭合（断言数对得上）+ 各 section 断言密度（≥10 条，防空样本假绿）+ 逐条 AC 覆盖 + 跨票接缝。
+每票收尾必做：
+
+- **跨票接缝**：本票产出物若会被下游票消费，加一条「下游消费路径」断言（不只验产出物形状），别让下游开工第一天撞格式墙。
+- **v1 裁量**（spec / 设计文档未钉的工程判断）：实现时按裁量写 → 关票评论全文记录可否决理由 → 收尾回复里单列给用户拍板 → 同时进 `.codebuddy/memory/STATUS.md`。
+- **票尾复查清单**：账目闭合（断言数对得上）+ 各 section 断言密度（≥10 条，防空样本假绿）+ 逐条 AC 覆盖 + 跨票接缝。
+
+### Windows / PowerShell 环境约束（仅本机；CI 在 Linux）
+
+执行任何 `git` / `gh` / Godot CLI、启动 Godot 编辑器，或任何含中文（非 ASCII）的内容要落盘 / 传出前：先读 `docs/agents/toolchain-win.md`。
+
+## Working conventions
+
+- 提交纪律：`git add` 只加具体路径；提交前确认改动清单与当前票范围一致（工作区有其它会话遗留改动时用路径限定 diff / review）。
+- `.codebuddy/` 被 gitignore：搜索工具查不到其中文件，查证用已知路径直读；需要长期有效、可评审的**规则**落本文件与 `docs/agents/`，状态与日志留在 `.codebuddy/memory/`。
+- 子代理能力边界：`code-explorer` 无网络、无 `use_skill`、无写文件 → research 类任务 = 子代理出底稿 + 主会话 `web_search` / `web_fetch` 核证落盘。
+- Agent skills：运行时 `<available_skills>` 只暴露一部分，不在列表 ≠ 未安装，需要时直接 `use_skill` 按名调用。
+- 命令输出必须整体落盘后 grep error，禁止只看末尾或截尾——靠前单元的错误会被吞掉造成假绿。
