@@ -28,7 +28,7 @@ Engine pinned to 4.7.x; agent training data is only reliable through 4.4, so ver
 
 ### Process audit
 
-The enforcement system is itself validated, not assumed. When work hits a gap in the standards — a fact stated wrong, a lookup that took a wrong path, a pointer that failed to fire, a legal-but-suboptimal choice — and when CI / a compile / a pre-commit hook goes red, or the first instance of a new asset type (`.tscn` / `.tres` / `.gdshader` / `addons/`) lands: classify the miss and feed the fix back per `docs/agents/process-audit.md`. Out-of-band audit runbooks live behind that page.
+The enforcement system is itself validated, not assumed. When work hits a gap in the standards — a fact stated wrong, a lookup that took a wrong path, a pointer that failed to fire, a legal-but-suboptimal choice — and when CI / a compile / a pre-commit hook goes red, the first instance of a new asset type (`.tscn` / `.tres` / `.gdshader` / `addons/`) lands, or you move / roll back / delete a doc (grep every anchor that pointed at it — `sh tools/check-doc-links.sh` does this): classify the miss and feed the fix back per `docs/agents/process-audit.md`. Out-of-band audit runbooks live behind that page.
 
 ### Cross-ticket discipline
 
