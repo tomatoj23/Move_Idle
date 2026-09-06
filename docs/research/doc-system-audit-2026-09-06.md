@@ -114,12 +114,14 @@
 |---|---|
 | 1 提交规则层 | 已执行 |
 | 2 悬空引用检查 | 已执行（`tools/check-doc-links.sh`、`.github/workflows/docs.yml`、`.githooks/pre-commit` 接入） |
-| 3 STATUS 定位 | 待拍板 |
-| 4 元层教训回仓 | 待拍板 |
-| 5 skill 化三个高频动作 | 待拍板（成本最高） |
-| 6 记忆蒸馏机制 | 待拍板 |
+| 3 STATUS 定位 | 已执行（`AGENTS.md` v1 裁量改为「真相在关票评论」，不再要求写进 STATUS；STATUS 只留当前票 + 上一票） |
+| 4 元层教训回仓 | 已执行（`process-audit.md` 加「机制可靠性的三个层级」+「元层失守」反哺行 + 开发内触发第 4 条） |
+| 5 skill 化三个高频动作 | 已执行（本机自建 `godot-4-7-verify` / `windows-chinese-io` / `cross-ticket-closeout`） |
+| 6 记忆蒸馏机制 | 已执行（`.codebuddy/memory/MEMORY.md`「蒸馏纪律」：>30 天蒸馏后删原文件；落点按三个层级判定） |
 | 7 Windows 锁文件型假绿 | 已执行（`godot-standards.md` 假绿模式节） |
 | 8 cmd `&` 吞输出 | 已执行（`toolchain-win.md` git/gh 节） |
 
 **首轮 CI 就抓出了检查脚本自身的假绿**（这正是加双平台验证的价值）：裸文件名原先按文件系统解析，本机的 `.codebuddy/memory/*.md` 能解析成功、CI 上不存在 → **本地绿、CI 红**。已改为按 `git ls-files`（索引）解析，两端判定一致。
 教训：凡「引用目标是否存在」类检查，判定依据必须是**入库内容**，不是本机文件系统——否则本地永远绿，红只在别人机器上出现。
+
+整改 5 落在本机 skills 目录（不进仓库，属机器相关）。三个 skill 只是**触发器**，规则正文仍在仓库 `docs/agents/`——改规则改仓库，改触发条件才改 skill。
