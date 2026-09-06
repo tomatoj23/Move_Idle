@@ -57,7 +57,7 @@
 
 ### GDScript / Core
 
-- 深拷贝用 `duplicate_deep(DEEP_DUPLICATE_ALL)`；`duplicate(true)` 自 4.5 只复制资源文件内部资源。（4.5）
+- 深拷贝用 `duplicate_deep(Resource.DeepDuplicateMode.DEEP_DUPLICATE_ALL)`——枚举不在全局作用域，标准速记裸写 `DEEP_DUPLICATE_ALL` **不编译**（4.7.2 实测探针 + class reference XML 双证）；`duplicate(true)` 自 4.5 只复制资源文件内部资源。（4.5）
 - 可变参数用 `func f(first: int, ...rest: Array)` 语法。（4.5）
 - 强制子类实现用 `@abstract class_name` + `@abstract func`。（4.5）
 - Packed Array **元素**赋值不触发整属性 setter（4.7）；setter 副作用逻辑改走整属性赋值或显式方法。

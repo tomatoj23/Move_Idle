@@ -60,7 +60,42 @@
 - **n=1 不调参**：单票结果只记录；同一项**连续两票**都 🟡/🔴 才动机制（区分「机制没用」与「这次恰好没碰上」）。
 - 验证不得扭曲被测任务本身：机制若碍事（如检查误报拦了提交），照实记录为数据点，不为「证明机制有效」而表演。
 
-## 6. 背景
+## 6. 开窗口操作（三步）
+
+### 第一步：被测会话结束时导出 JSON
+
+导出件**不要留在仓库根**（会变成 untracked 垃圾、有误提交风险）。移到 `.codebuddy/audit/`：
+
+```powershell
+# 按修改时间取最新一个 json 搬进审计目录（文件名含中文 / 冒号也不用手动打）
+Get-ChildItem -Path $HOME\Downloads -Filter *.json |
+  Sort-Object LastWriteTime -Descending | Select-Object -First 1 |
+  Move-Item -Destination 'd:\My_Projects\Move_Idle\.codebuddy\audit\session33.json'
+```
+
+（若导出时能直接选路径，直接选 `.codebuddy/audit/` 即可。）
+
+### 第二步：开新窗口，开场白照抄
+
+被测会话与审计会话**分开两个窗口**——审计要看完整时间线，撑爆上下文就失去「只填档」的克制。
+
+```
+读 docs/agents/pointer-audit-method.md，然后按它审计 .codebuddy/audit/session33.json。
+只降维、填档、给结论；不要修改任何仓库文件（game/、docs/、tools/ 一律不动），
+也不要改 .codebuddy/memory/pointer-audit-2026-09-06.md 的判据行。
+```
+
+被测会话那边的开场白同样要克制，只说任务本身，**不提示**用 skill 或读哪份文档。
+
+### 第三步：审计窗口交付什么
+
+1. 跑 `tools/session-audit.ps1` 降维。
+2. 按 §3 五步走，逐行填 15 行判据。
+3. 输出结论 + 回流建议（对话里给）。
+4. 结论落 `.codebuddy/audit/session33.verdict.md`，并追加一条到当日工作记忆。
+5. **不碰仓库**——🟡/🔴 只记录，连续两票才动机制。
+
+## 7. 背景
 
 本方法成型于 2026-09-06 的执法体系审计：四条验收线中「已有教训能否防重踩」判红，根因是**教训只留在被 gitignore 的记忆里、没变成可查判据**——回流进仓库的几条当天就抓到了真问题，没回流的四条全部跨日复发。
 
