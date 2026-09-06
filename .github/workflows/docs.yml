@@ -1,0 +1,38 @@
+name: Docs
+
+# 只跑文档侧检查，不下载 Godot（与 game/ 的 validate 工作流分开，避免文档改动触发引擎校验）。
+# 与 .githooks/pre-commit 同源：sh tools/check-doc-links.sh
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "schema/**"
+      - "AGENTS.md"
+      - "CONTEXT.md"
+      - "tools/check-doc-links.sh"
+      - ".github/workflows/docs.yml"
+  pull_request:
+    paths:
+      - "docs/**"
+      - "schema/**"
+      - "AGENTS.md"
+      - "CONTEXT.md"
+      - "tools/check-doc-links.sh"
+      - ".github/workflows/docs.yml"
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  doc-links:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check doc cross-references
+        # 悬空指针是文档重排 / 回滚后最易腐、肉眼最难发现的一类问题（审计 F2）
+        run: sh tools/check-doc-links.sh
