@@ -34,6 +34,9 @@
 **预登记判据表刻意不放在仓库里**：放进仓库 = 被测会话能读到 = 提前知道答案。
 它在 `.codebuddy/memory/pointer-audit-2026-09-06.md`，含四档判分与「判绿陷阱」列。
 
+完整方法（三层框架、执行步骤、判分与纪律、污染处理）见 `docs/agents/pointer-audit-method.md`
+（同为带外，不进 `AGENTS.md`）。**它出现在被测会话时间线里 = 该会话知情**，按该页开头规则作废相应判据。
+
 对被测/实弹会话的导出 JSON 做固定检查单：
 
 1. 提取工具调用时间线（`tool-call` 节点序列 + 参数摘要；节点结构 = type/toolCallId/toolName/args）。
