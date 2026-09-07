@@ -41,5 +41,6 @@
 ## git / gh
 
 - GraphQL 内嵌双引号会被 PowerShell 5.1 吞（语法错）；`--jq` 表达式引号易碎，改用管道 `ConvertFrom-Json`；`gh api` 用显式完整仓库路径。
+- `gh issue view <n> --comments` 在**零评论时零输出且 exit 0**（该旗标只输出评论，不输出正文）——读票正文一律 `--json body` 或 `--json number,title,body,labels`。
 - **并发会话共享同一个 git 索引**（非 Windows 专属，属同一类命令纪律）：`git add <具体路径>` 之后、`commit` 之前，另一会话往索引里加的东西会被**一起提交**（实测发生：一笔只该含 1 个文档的提交，把别人的 1 行标准页修正也带进去了）。提交前先 `git diff --cached --stat` 核对清单；`git add` 与 `git commit` 尽量紧邻执行。
 - `cmd /c` 里用 `&` 串联多条命令时，**前一条带重定向的输出会被吞**（实测：`git config --get core.hooksPath > f 2>&1 & git ls-files ... >> f` 只留下后者输出，前者被误读成「键未配置」而误判钩子未装机）。配置 / 状态类查询**单独一条命令跑**，结论才可信。
