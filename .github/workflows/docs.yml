@@ -54,6 +54,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install validator dependencies
+        run: npm ci --prefix tools/validator
+
       - name: Install hook (new-clone procedure)
         run: |
           git config core.hooksPath .githooks
@@ -76,6 +83,18 @@ jobs:
           git add docs/_probe.md
           if git commit -m "probe: dangling ref (hook must reject)"; then
             echo "::error::pre-commit hook did NOT reject the dangling doc ref"
+            exit 1
+          fi
+          echo "pre-commit hook rejected it as expected"
+          git reset
+
+      - name: Invalid content must be rejected
+        # 内容校验段（#26）的执法探针：钩子段被短路时这里会假绿（#26 实测教训）
+        run: |
+          printf '{"id":"probe_bad","name":"probe"}\n' > content/attributes/probe_bad.json
+          git add content/attributes/probe_bad.json
+          if git commit -m "probe: invalid content (hook must reject)"; then
+            echo "::error::pre-commit hook did NOT reject the invalid content"
             exit 1
           fi
           echo "pre-commit hook rejected it as expected"
