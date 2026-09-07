@@ -5,10 +5,16 @@ on:
     branches: [main]
     paths:
       - "game/**"
+      - "content/**"
+      - "schema/**"
+      - "tools/validator/**"
       - ".github/workflows/ci.yml"
   pull_request:
     paths:
       - "game/**"
+      - "content/**"
+      - "schema/**"
+      - "tools/validator/**"
       - ".github/workflows/ci.yml"
 
 concurrency:
@@ -66,3 +72,25 @@ jobs:
         with:
           name: check-output
           path: check_output.log
+
+  content-validator:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install validator dependencies
+        run: npm ci --prefix tools/validator
+
+      - name: Typecheck validator
+        run: npm run typecheck --prefix tools/validator
+
+      - name: Validator self tests
+        run: npm test --prefix tools/validator
+
+      - name: Validate content library
+        run: node tools/validator/src/cli.ts --content content --schema schema

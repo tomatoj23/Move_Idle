@@ -19,3 +19,24 @@ fi
 # 用 source 而非 sh 调用：钩子本身由 sh 执行，source 不依赖 PATH 里有没有 sh，
 # 且脚本缺失时是硬失败而不是静默跳过（静默跳过 = 假绿）。
 . "$(git rev-parse --show-toplevel)/tools/check-doc-links.sh"
+
+# 内容库校验（#26）：schema + 引用完整性 + id 规则的唯一真相（tools/validator/README.md）。
+# 每次提交全库跑（成本 <1s）；依赖未装 / node 过旧 = 硬失败而非静默跳过（假绿防线）。
+repo_root="$(git rev-parse --show-toplevel)"
+if ! command -v node >/dev/null 2>&1; then
+  echo "pre-commit 拦截：未找到 node（校验器需 Node.js >= 24，原生 TS 运行）。安装后重试提交。"
+  exit 1
+fi
+if ! node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 24 ? 0 : 1)'; then
+  echo "pre-commit 拦截：node 版本过低（$(node --version)），校验器需 Node.js >= 24。升级后重试提交。"
+  exit 1
+fi
+if [ ! -d "$repo_root/tools/validator/node_modules" ]; then
+  echo "pre-commit 拦截：tools/validator 依赖未安装。"
+  echo "先执行：cd tools/validator && npm install ，再重试提交。"
+  exit 1
+fi
+if ! node "$repo_root/tools/validator/src/cli.ts" --content "$repo_root/content" --schema "$repo_root/schema"; then
+  echo "pre-commit 拦截：内容库校验未过（见上方 JSON 的 errors[]，按 file/field/reason 定位修复）。"
+  exit 1
+fi
