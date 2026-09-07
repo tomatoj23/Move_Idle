@@ -16,9 +16,12 @@ fi
 
 # 文档互引完整性（与 .github/workflows/docs.yml 同源，勿分叉）。
 # 悬空指针是文档重排 / 回滚后最易腐、肉眼最难发现的一类问题（审计 F2）。
-# 用 source 而非 sh 调用：钩子本身由 sh 执行，source 不依赖 PATH 里有没有 sh，
-# 且脚本缺失时是硬失败而不是静默跳过（静默跳过 = 假绿）。
-. "$(git rev-parse --show-toplevel)/tools/check-doc-links.sh"
+# 用子进程调用而非 source：check-doc-links.sh 末尾有 exit 0，source 会退出宿主
+# 钩子 shell，把后续所有检查段短路掉（实测 #26 内容校验段因此从未执行）。
+# 子进程下脚本缺失/失败都返回非零，硬失败语义不丢。
+if ! sh "$(git rev-parse --show-toplevel)/tools/check-doc-links.sh"; then
+  exit 1
+fi
 
 # 内容库校验（#26）：schema + 引用完整性 + id 规则的唯一真相（tools/validator/README.md）。
 # 每次提交全库跑（成本 <1s）；依赖未装 / node 过旧 = 硬失败而非静默跳过（假绿防线）。
