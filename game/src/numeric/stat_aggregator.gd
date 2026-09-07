@@ -1,6 +1,7 @@
 class_name StatAggregator
 extends RefCounted
-## 属性聚合纯函数（combat-model #2）：等级基准 + 基底固有属性 + 词缀 → StatTable。
+## 属性聚合纯函数（combat-model #2）：等级基准 + 基底固有属性 + 词缀 + 套装阶梯
+## → StatTable。
 ## 来源分派（common v1 stat_op / effect_primitive 语义）：
 ## - 无显式 operation（stat 词缀、固有属性）：按属性注册表 aggregation 字段分派
 ##   —— add 求和、multiply 连乘（multiply 无来源 = 1.0 恒等）。
@@ -9,6 +10,8 @@ extends RefCounted
 ##   「add：按属性聚合方式叠加」）。
 ## 两阶段结算：全部加算源先并入，乘算源统一在其后相乘——结果与来源先后次序
 ## 无关（武器 +12 与饰品 ×1.3 的先后不该改变结果）。
+## 第四来源 = 套装阶梯（set-items #18 §4）：bonus 参数由门面按「件数达标才展开」
+## 传入，形状与词缀 mod 相同（attribute/value/operation?），经同一 _collect 分派。
 ## 输入 / 输出全是语言内建容器，零引擎 API、零 IO——在线、离线、编辑器三处同构复用。
 ## 玩家等级基准曲线归引擎常量（progression-structure #6：简单分段线性；MVP 单段，
 ## 内容库不存基准值，注册表只登记属性）。平衡调整只动本文件常量。
@@ -42,7 +45,9 @@ static func player_base_stats(level: int) -> Dictionary:
 ##    "affixes": [{"attribute", "value"}... 或 {"attribute", "value", "operation"}...]}
 ## （实例的词缀数值已由输入状态携带——实例 roll 归掉落/背包票；"operation" 仅
 ## stat_amp 来源携带，语义见文件头。）
-static func aggregate(stat_registry: Dictionary, level: int, equipped: Array) -> Dictionary:
+## bonus = 套装阶梯等非实例来源的 mods（形状同上，默认空 = 无第四来源）。
+static func aggregate(stat_registry: Dictionary, level: int, equipped: Array,
+		bonus: Array = []) -> Dictionary:
 	var stats := player_base_stats(level)
 	var mults: Array = []  # 乘算源 [attr_id, value]，统一在加算源之后结算
 	for inst in equipped:
@@ -50,6 +55,8 @@ static func aggregate(stat_registry: Dictionary, level: int, equipped: Array) ->
 			_collect(stats, stat_registry, mod, mults)
 		for mod in inst.get("affixes", []):
 			_collect(stats, stat_registry, mod, mults)
+	for mod in bonus:
+		_collect(stats, stat_registry, mod, mults)
 	for m in mults:
 		var attr_id := String(m[0])
 		stats[attr_id] = stats.get(attr_id, 1.0) * float(m[1])

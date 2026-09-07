@@ -41,6 +41,14 @@ extends RefCounted
 ## （限已解锁）。种子部件不含 tier：同输入必得同事件流在任意固定 tier 下成立。
 ## 对 #39 离线票的接缝：离线补算必须把 new_state 的 unlocked / idle_spot 还原为
 ## 会话前取值（「离线不推进、不写解锁」由离线结算票保证），经验 / 掉落照常入账。
+## #35 增量：套装阶梯进聚合链（set-items #18）——穿着件数只数装备槽中的成员件
+## （背包里的不算），每套独立计数，多套互不稀释；件数达标（最低 2 件）即激活
+## 对应档，3 件 = 两档叠加。效果展开与传奇词缀共用同一求值器：stat_amp 作为
+## 聚合链第四来源（StatAggregator.aggregate 的 bonus 参数），proc/convert 按
+## 同形载荷进 EncounterSim 结算钩子。套装归属由 base_id 对套装对象反查推导——
+## 不入档、不入种子（equipment JSON 已在种子部件里，推导态随装备自动确定）。
+## 展开序 = 套装 id 字典序（对内容目录序无关）× 档位清单序（schema 约定升序，
+## 校验器执法）× 效果清单序：同一内容库下确定。
 ## 确定性：种子从**完整输入**派生（区域、遭遇、等级、技能装配、装备形状）——
 ## 同输入必得同事件流；同关同级不同 build 不共享随机序列。背包不在种子部件里
 ## （掉落入包不扰动后续战斗）；tier 也不在部件里（同输入在固定 tier 下必得同流，
@@ -89,7 +97,8 @@ static func run_encounter(state: Dictionary, content_db: ContentDB, ref: Diction
 	var prep := _prepare(state, content_db, ref)
 	if prep["errors"].size() > 0:
 		return {"errors": prep["errors"]}
-	var stats := StatAggregator.aggregate(content_db.attributes, prep["level"], prep["equipped"])
+	var stats := StatAggregator.aggregate(content_db.attributes, prep["level"],
+			prep["equipped"], prep["set_mods"])
 	var rng: DeterministicRng
 	var sim_resume: Dictionary = {}
 	if resume.is_empty():
@@ -227,7 +236,8 @@ static func query_stats(state: Dictionary, content_db: ContentDB) -> Dictionary:
 	var v := _validate_state(state, content_db)
 	if v["errors"].size() > 0:
 		return {"errors": v["errors"]}
-	return {"stats": StatAggregator.aggregate(content_db.attributes, v["level"], v["equipped"])}
+	return {"stats": StatAggregator.aggregate(content_db.attributes, v["level"],
+			v["equipped"], v["set_mods"])}
 
 
 ## AC5：玩家自选挂机点（区域 + 难度阶），限已解锁（progression-structure §5）。
@@ -298,9 +308,10 @@ static func next_ref(state: Dictionary, content_db: ContentDB, last_ref: Diction
 			"tier": int(last_ref.get("tier", 0))}}
 
 
-## 状态侧校验（等级 + 技能装配 + 穿戴实例），战斗与面板共用同一条执法路径。
-## 返回 {"errors": PackedStringArray, "level": int, "resolved_skills": Array,
-##   "equipped": Array（聚合输入）, "fx": {"on_hit" / "on_kill" / "convert"}}。
+## 状态侧校验（等级 + 技能装配 + 穿戴实例 + 套装阶梯展开），战斗与面板共用同一条
+## 执法路径。返回 {"errors": PackedStringArray, "level": int, "resolved_skills": Array,
+##   "equipped": Array（聚合输入）, "fx": {"on_hit" / "on_kill" / "convert"},
+##   "set_mods": Array（套装阶梯的 stat_amp，聚合链第四来源）}。
 static func _validate_state(state: Dictionary, content_db: ContentDB) -> Dictionary:
 	var errors := PackedStringArray()
 	var level := int(state.get("player_level", 0))
@@ -333,12 +344,15 @@ static func _validate_state(state: Dictionary, content_db: ContentDB) -> Diction
 			resolved_skills.append(rec)
 
 	var equipped: Array = []
+	var worn_bases: Array = []  # 已通过校验入列的穿戴基底 id（套装件数只数它们）
 	# 传奇效果收集（#30）：依装备槽序 × 实例词缀序 × 效果清单序展开，供遭遇模拟
-	# 求值。stat_amp 直接并入聚合链；proc/convert 传给 EncounterSim（套装阶梯接入
-	# 后复用同一求值器，set-items 既定）。效果数值固定于内容（#8 约定），实例不携带。
+	# 求值。stat_amp 直接并入聚合链；proc/convert 传给 EncounterSim（套装阶梯
+	# #35 已接入，同一求值器）。效果数值固定于内容（#8 约定），实例不携带。
 	var fx_on_hit: Array = []
 	var fx_on_kill: Array = []
 	var fx_convert: Array = []
+	# 效果钩子聚合视图（Array 是引用类型）：共用展开器 _expand_effect 与返回载荷都指向它们。
+	var fx := {"on_hit": fx_on_hit, "on_kill": fx_on_kill, "convert": fx_convert}
 	var equipment: Dictionary = state.get("equipment", {})
 	for slot in StatAggregator.EQUIP_SLOTS:
 		var inst = equipment.get(slot)
@@ -363,31 +377,7 @@ static func _validate_state(state: Dictionary, content_db: ContentDB) -> Diction
 				continue
 			if String(arec["kind"]) == "legendary":
 				for e in arec["legendary"].get("effects", []):
-					match String(e["type"]):
-						"stat_amp":
-							entry["affixes"].append({
-								"attribute": String(e["attribute"]),
-								"value": float(e["value"]),
-								"operation": String(e["operation"]),
-							})
-						"proc_on_hit":
-							fx_on_hit.append({
-								"chance_percent": float(e["chance_percent"]),
-								"damage_type": String(e["damage_type"]),
-								"damage_percent": float(e["damage_percent"]),
-							})
-						"proc_on_kill":
-							fx_on_kill.append({
-								"chance_percent": float(e["chance_percent"]),
-								"effect": String(e["effect"]),
-								"amount_percent": float(e["amount_percent"]),
-							})
-						"convert_damage":
-							fx_convert.append({
-								"from_type": String(e["from_type"]),
-								"to_type": String(e["to_type"]),
-								"percent": float(e["percent"]),
-							})
+					_expand_effect(e, entry["affixes"], fx)
 				continue
 			if not (aff.get("values") is Array):
 				errors.append("affix instance %s needs a values array (per-mod rolled numbers); refusing to silently drop it"
@@ -400,13 +390,66 @@ static func _validate_state(state: Dictionary, content_db: ContentDB) -> Diction
 					continue
 				entry["affixes"].append({"attribute": attr_id, "value": float(v.get("value", 0.0))})
 		equipped.append(entry)
+		worn_bases.append(String(base_rec["id"]))
+	# 套装阶梯（#35，set-items #18 §2/§4）：件数只数装备槽中的成员件（背包不算），
+	# 每套独立计数；pieces <= worn 的档全部激活（3 件 = 2 件档 + 3 件档叠加），
+	# 阈值下限 2 件由内容库断言保证（tiers[].pieces >= 2）。展开序 = 套装 id
+	# 字典序（对内容目录序无关）× 档位清单序（schema 约定升序，校验器 #26 执法）
+	# × 效果清单序。stat_amp 进聚合链第四来源（set_mods）；proc/convert 与传奇
+	# 词缀共用 _expand_effect（同一求值器，不新增原语）。
+	var set_mods: Array = []
+	var set_ids: Array = content_db.sets.keys()
+	set_ids.sort()
+	for sid in set_ids:
+		var set_rec: Dictionary = content_db.sets[sid]
+		var worn := 0
+		for base_id in worn_bases:
+			if (set_rec["members"] as Array).has(base_id):
+				worn += 1
+		for tier in set_rec["tiers"]:
+			if int(tier["pieces"]) > worn:
+				continue
+			for e in tier["effects"]:
+				_expand_effect(e, set_mods, fx)
 	return {
 		"errors": errors,
 		"level": level,
 		"resolved_skills": resolved_skills,
 		"equipped": equipped,
-		"fx": {"on_hit": fx_on_hit, "on_kill": fx_on_kill, "convert": fx_convert},
+		"fx": fx,
+		"set_mods": set_mods,
 	}
+
+
+## 单条效果原语的归一化展开——传奇词缀（#30）与套装阶梯（#35）共用同一形状契约：
+## stat_amp 落 stat_target（传奇 = 携带实例的词缀表，套装 = 聚合链第四来源 bonus），
+## proc/convert 落 fx 对应结算钩子数组。载荷字段与 schema 原语一一对应。
+static func _expand_effect(e: Dictionary, stat_target: Array, fx: Dictionary) -> void:
+	match String(e["type"]):
+		"stat_amp":
+			stat_target.append({
+				"attribute": String(e["attribute"]),
+				"value": float(e["value"]),
+				"operation": String(e["operation"]),
+			})
+		"proc_on_hit":
+			(fx["on_hit"] as Array).append({
+				"chance_percent": float(e["chance_percent"]),
+				"damage_type": String(e["damage_type"]),
+				"damage_percent": float(e["damage_percent"]),
+			})
+		"proc_on_kill":
+			(fx["on_kill"] as Array).append({
+				"chance_percent": float(e["chance_percent"]),
+				"effect": String(e["effect"]),
+				"amount_percent": float(e["amount_percent"]),
+			})
+		"convert_damage":
+			(fx["convert"] as Array).append({
+				"from_type": String(e["from_type"]),
+				"to_type": String(e["to_type"]),
+				"percent": float(e["percent"]),
+			})
 
 
 ## 战斗路径全量准备：状态校验 + 遭遇解析。errors 非空即拒绝，绝不带着坏输入开打。
@@ -463,6 +506,7 @@ static func _prepare(state: Dictionary, content_db: ContentDB, ref: Dictionary) 
 		"resolved_skills": v["resolved_skills"],
 		"equipped": v["equipped"],
 		"fx": v["fx"],
+		"set_mods": v["set_mods"],
 		"zone_id": zone_id,
 		"encounter_index": encounter_index,
 		"tier": tier,

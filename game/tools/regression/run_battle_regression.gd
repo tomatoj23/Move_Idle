@@ -19,6 +19,12 @@ extends SceneTree
 ## (player level excluded), kill exp and level-ups at encounter boundaries,
 ## boss-win unlocks with first-clear anchor advance, loss fallback (never
 ## stuck), idle spot choice and the next_ref walk (transient, restart re-anchors).
+## #35 headless regression: set ladders — worn-piece counting per set (banked pieces
+## excluded), tier activation at >= 2 pieces with tiers stacking, stat_amp into the
+## aggregation chain (panel visible), proc/convert through the shared settlement
+## hooks, per-set independent counting, mid-encounter re-aggregation on tier
+## change, derived membership (no state/save fields), and both pilot sets
+## end-to-end on real content.
 ## The ONLY seam under test is SessionFacade.run_encounter (spec #24 Testing Decisions);
 ## internal pure functions (aggregation / encounter sim / PRNG) are NOT tested directly.
 ## Run:
@@ -154,6 +160,12 @@ func _initialize() -> void:
 	_run_prog_fallback(tmp)
 	_section("progression: chain top, re-farm stickiness, state seam")
 	_run_prog_chain_top(tmp)
+	_section("set ladder: counting, activation, per-set independence (panel)")
+	_run_set_ladder_panel(content_root)
+	_section("set ladder: battle effects through the shared evaluator")
+	_run_set_ladder_battle(content_root, tmp)
+	_section("set ladder: mid-encounter re-aggregation on tier change")
+	_run_set_ladder_reagg(tmp)
 
 	_rmtree(tmp)
 	_report()
@@ -408,6 +420,16 @@ func _run_content_load(content_root: String, tmp: String) -> void:
 						"effect": "summon_dragon", "amount_percent": 1}]}},
 	})
 	_check(ContentDB.load_from_dir(case_dir).errors.size() > 0, "unknown proc_on_kill effect value -> error")
+
+	case_dir = tmp.path_join("bad_amp_op")
+	_write_mini_db(case_dir, [_mini_monster("mob_x", ok_stats)], "mob_x", {
+		"affixes/affix_bad_amp.json": {"id": "affix_bad_amp", "name": "Bad Amp",
+				"kind": "legendary",
+				"legendary": {"effects": [{"type": "stat_amp", "attribute": "attack_power",
+						"operation": "times", "value": 1.3}]}},
+	})
+	_check(ContentDB.load_from_dir(case_dir).errors.size() > 0,
+			"stat_amp operation outside add|multiply -> error")
 
 
 func _run_encounter_win(content_root: String) -> void:
@@ -3059,3 +3081,441 @@ func _run_prog_chain_top(tmp: String) -> void:
 			{"zone_id": "zone_prog3", "encounter_index": 0, "tier": 1})
 	_check(not rerun.has("errors") and String(rerun.get("result", "")) == "win",
 			"seam: the round-tripped state fights on (JSON-able deep copy)")
+
+
+# ---------------------------------------------------------------- #35 sections
+
+## AC1/AC2/AC3/AC6/AC7（面板侧）：套装件只数装备槽中的成员件（背包里的不算）；
+## 件数达标才激活对应阶梯（最低 2 件，3 件 = 两档叠加）；每套独立计数（混穿互不
+## 稀释）；stat_amp 经聚合链在面板可见；套装归属由基底 id 推导——状态与实例零
+## 新增字段（不入档）。两套试点 = 真实 content/sets/（熔核之誓 / 回响圣所，#18 §5）。
+func _run_set_ladder_panel(content_root: String) -> void:
+	var db := _load_db(content_root)
+	if not db.errors.is_empty():
+		return
+	var mg := {"base": "base_magma_greatsword", "rarity": "rare", "ilvl": 1,
+			"name": "熔核巨剑", "affixes": []}
+	var mp := {"base": "base_magma_plate", "rarity": "rare", "ilvl": 1,
+			"name": "熔核胸甲", "affixes": []}
+	var ms := {"base": "base_magma_signet", "rarity": "rare", "ilvl": 1,
+			"name": "熔核印戒", "affixes": []}
+	var em := {"base": "base_echo_mace", "rarity": "rare", "ilvl": 1,
+			"name": "回响晨星锤", "affixes": []}
+	var er := {"base": "base_echo_robe", "rarity": "rare", "ilvl": 1,
+			"name": "回响法袍", "affixes": []}
+	var ea := {"base": "base_echo_amulet", "rarity": "rare", "ilvl": 1,
+			"name": "回响护符", "affixes": []}
+	var packed := {"player_level": 1, "equipment": {}, "skills": [],
+			"inventory": [mg, mp, ms, em, er, ea]}
+
+	# AC2：背包里的成员件不算数——六件全套在包，零穿戴 = 零阶梯。
+	var q0 := SessionFacade.query_stats(packed, db)
+	_check(not q0.has("errors"), "set panel: the packed state queries without errors")
+	if q0.has("errors"):
+		for e in q0["errors"]:
+			print(ANCHOR + "   query error: " + e)
+		return
+	_check(absf(float(q0["stats"]["attack_speed"]) - 1.0) < 0.0001,
+			"set panel: banked pieces never move attack_speed (only worn pieces count)")
+	_check(float(q0["stats"]["max_hp"]) == 100.0,
+			"set panel: banked pieces never move max_hp (AC2)")
+
+	# 熔核 1 件：无阶梯（最低档 = 2 件，AC3），固有属性照常进面板。
+	var e1 := SessionFacade.equip(packed, db, 0, "weapon")
+	_check(not e1.has("errors"), "set panel: the greatsword equips cleanly")
+	if e1.has("errors"):
+		return
+	var q1 := SessionFacade.query_stats(e1["state"], db)
+	_check(not q1.has("errors"), "set panel: the 1-piece state queries without errors")
+	if q1.has("errors"):
+		return
+	_check(absf(float(q1["stats"]["attack_speed"]) - 1.0) < 0.0001,
+			"set panel: one set piece activates no tier (the ladder starts at 2)")
+	_check(float(q1["stats"]["attack_power"]) == 24.0,
+			"set panel: the piece's own implicit (+14 AP) still aggregates")
+
+	# 熔核 2 件：2 件档 stat_amp 攻速 ×1.10 进聚合链（AC3/AC4）。
+	var e2 := SessionFacade.equip(e1["state"], db, 0, "armor")
+	_check(not e2.has("errors"), "set panel: the plate equips cleanly")
+	if e2.has("errors"):
+		return
+	var q2 := SessionFacade.query_stats(e2["state"], db)
+	_check(not q2.has("errors"), "set panel: the 2-piece state queries without errors")
+	if q2.has("errors"):
+		return
+	_check(absf(float(q2["stats"]["attack_speed"]) - 1.1) < 0.0001,
+			"set panel: two magma pieces lift attack_speed 1.0 -> 1.10 (2-piece tier)")
+	_check(float(q2["stats"]["damage_reduction"]) == 5.0,
+			"set panel: the plate's own implicit (+5 DR) rides along")
+
+	# 熔核 3 件：3 件档（convert）不进面板，2 件档叠加仍在（AC3 层叠语义）。
+	var e3 := SessionFacade.equip(e2["state"], db, 0, "trinket")
+	_check(not e3.has("errors"), "set panel: the signet equips cleanly")
+	if e3.has("errors"):
+		return
+	var q3 := SessionFacade.query_stats(e3["state"], db)
+	_check(not q3.has("errors"), "set panel: the 3-piece state queries without errors")
+	if q3.has("errors"):
+		return
+	_check(absf(float(q3["stats"]["attack_speed"]) - 1.1) < 0.0001,
+			"set panel: the 2-piece tier still stacks under the 3-piece one (3 worn)")
+	_check(float(q3["stats"]["crit_chance"]) == 8.0,
+			"set panel: the signet's own implicit (+3 crit) rides along")
+
+	# AC2 每套独立计数：熔核 2 件 + 回响 1 件 = 只有熔核出档，回响 1 件不出档。
+	var mixed := {"player_level": 1, "equipment": {}, "skills": [],
+			"inventory": [mg, mp, ea]}
+	var m1 := SessionFacade.equip(mixed, db, 0, "weapon")
+	_check(not m1.has("errors"), "set panel: the cross-set wear step 1")
+	if m1.has("errors"):
+		return
+	var m2 := SessionFacade.equip(m1["state"], db, 0, "armor")
+	_check(not m2.has("errors"), "set panel: the cross-set wear step 2")
+	if m2.has("errors"):
+		return
+	var m3 := SessionFacade.equip(m2["state"], db, 0, "trinket")
+	_check(not m3.has("errors"), "set panel: the cross-set wear step 3")
+	if m3.has("errors"):
+		return
+	var qm := SessionFacade.query_stats(m3["state"], db)
+	_check(not qm.has("errors"), "set panel: the cross-set state queries without errors")
+	if qm.has("errors"):
+		return
+	_check(absf(float(qm["stats"]["attack_speed"]) - 1.1) < 0.0001,
+			"set panel: magma still counts 2/2 across a foreign trinket (per-set counting)")
+	_check(float(qm["stats"]["max_hp"]) == 100.0,
+			"set panel: one echo piece activates nothing (sets count independently)")
+
+	# 回响 2 件：生命上限 ×1.12（生存向试点，AC7）。
+	var epack := {"player_level": 1, "equipment": {}, "skills": [],
+			"inventory": [em, er, ea]}
+	var f1 := SessionFacade.equip(epack, db, 0, "weapon")
+	_check(not f1.has("errors"), "set panel: the echo wear step 1")
+	if f1.has("errors"):
+		return
+	var f2 := SessionFacade.equip(f1["state"], db, 0, "armor")
+	_check(not f2.has("errors"), "set panel: the echo wear step 2")
+	if f2.has("errors"):
+		return
+	var qf := SessionFacade.query_stats(f2["state"], db)
+	_check(not qf.has("errors"), "set panel: the echo state queries without errors")
+	if qf.has("errors"):
+		return
+	_check(absf(float(qf["stats"]["max_hp"]) - 145.6) < 0.0001,
+			"set panel: two echo pieces lift max_hp (100 + 30) x 1.12 = 145.6")
+
+	# AC6：套装归属由基底 id 推导——状态与实例零新增字段（不入档）。
+	var s3: Dictionary = e3["state"]
+	var keys := s3.keys()
+	keys.sort()
+	_check(JSON.stringify(keys) == JSON.stringify(
+			["equipment", "inventory", "player_level", "skills"]),
+			"set panel: the equipped state grows no set-membership field (derived, not stored)")
+	_check_closed(s3["equipment"]["trinket"], INSTANCE_KEYS,
+			"set panel: the worn set instance")
+
+
+## AC4/AC7（战斗侧）：阶梯效果与传奇词缀共用同一求值器——熔核 2 件档的 stat_amp
+## 改变出手节奏（间隔 10 -> 9），3 件档的 convert_damage 让物理原生命中报 fire 且
+## 伤害按混合系数重推导；回响 3 件档的 proc_on_kill heal（真实试点数值 20%/4%）
+## 在真实内容上可观测：heal 无事件（事件模型零变更），观测点 = 续跑句柄的边界
+## 血量高于「满血 − 承伤」，60 个确定性种子至少一个命中 20% 概率。
+func _run_set_ladder_battle(content_root: String, tmp: String) -> void:
+	var db := _load_db(content_root)
+	if not db.errors.is_empty():
+		return
+	var mg := {"base": "base_magma_greatsword", "rarity": "rare", "ilvl": 1,
+			"name": "熔核巨剑", "affixes": []}
+	var mp := {"base": "base_magma_plate", "rarity": "rare", "ilvl": 1,
+			"name": "熔核胸甲", "affixes": []}
+	var ms := {"base": "base_magma_signet", "rarity": "rare", "ilvl": 1,
+			"name": "熔核印戒", "affixes": []}
+	var pstats := {"attack_power": 24.0, "crit_damage": 50.0}  # 10 base + 14 implicit
+
+	# 熔核 1 件（对照）：无转换、无放大——物理命中报 physical、节奏仍 10 tick。
+	var r1 := SessionFacade.run_encounter({"player_level": 1,
+			"equipment": {"weapon": mg}, "skills": []}, db, REF_FIRST)
+	_check(not r1.has("errors"), "set battle: the 1-piece magma run completes")
+	if r1.has("errors"):
+		return
+	_check(String(r1["events"][0]["element"]) == "physical",
+			"set battle: without a tier, physical-native hits report physical")
+	var p1_hits: Array = (r1["events"] as Array).filter(func(e):
+		return e["type"] == "on_attack" and e["attacker"] == "player")
+	var p1_expect: int = floori(float(r1["duration_ticks"]) / 10.0) + 1
+	_check(p1_hits.size() == p1_expect,
+			"set battle: 1-piece cadence stays at interval 10 (%d hits in %d ticks)"
+					% [p1_hits.size(), int(r1["duration_ticks"])])
+	_verify_stream(r1["events"], pstats, db.monsters["mob_skeleton_warrior"]["stats"],
+			"magma1")
+
+	# 熔核 2 件：stat_amp 攻速 ×1.10 -> 出手间隔 max(1, round(10/1.1)) = 9。
+	# 用 5 怪遭遇 + 20 级玩家（HP 480 顶得住 5 怪集火、AP 62 = 10 曲线 + 38 等级
+	# + 14 固有一刀一只）：黄金值 duration 36 / 恰 5 刀直接钉死。判别力来自钉值
+	# 而非自适应公式——floor(duration/interval)+1 对任何 duration 都自洽（实测
+	# 因此假绿过：lose 战斗的 30 tick 也满足该式），无档时 duration 40，钉值必红。
+	var r2 := SessionFacade.run_encounter({"player_level": 20,
+			"equipment": {"weapon": mg, "armor": mp}, "skills": []}, db,
+			{"zone_id": "zone_graveyard_path", "encounter_index": 2})
+	_check(not r2.has("errors"), "set battle: the 2-piece magma run completes")
+	if r2.has("errors"):
+		return
+	_check(String(r2["result"]) == "win" and int(r2["duration_ticks"]) == 36,
+			"set battle: the 2-piece cadence clears the 5-monster fight at tick 36 (interval 9; unamplified would be 40)")
+	var p2_hits: Array = (r2["events"] as Array).filter(func(e):
+		return e["type"] == "on_attack" and e["attacker"] == "player")
+	_check(p2_hits.size() == 5,
+			"set battle: the 2-piece fight needs exactly 5 player hits (one per skeleton)")
+	var p2_raw_ok := true
+	for e in p2_hits:
+		var critf := 1.0
+		if bool(e["crit"]):
+			critf = 1.0 + CRIT_DAMAGE_BASE / 100.0
+		if int(e["raw_damage"]) != floori(62.0 * critf):
+			p2_raw_ok = false
+	_check(p2_raw_ok,
+			"set battle: the 2-piece run's player hits re-derive from AP 62 (one-shot 62, crit 93)")
+	var p2_elem_ok := true
+	for e in p2_hits:
+		if String(e["element"]) != "physical":
+			p2_elem_ok = false
+	_check(p2_elem_ok,
+			"set battle: the 2-piece tier adds no conversion (elements stay physical)")
+
+	# 熔核 3 件：convert_damage 25% 物理->火进结算钩子——每个物理原生命中报 fire，
+	# 伤害 = 攻击强度 x 混合系数（火系数无来源 = 1.0，与未转换同值，逐事件重推导）。
+	var r3 := SessionFacade.run_encounter({"player_level": 1,
+			"equipment": {"weapon": mg, "armor": mp, "trinket": ms}, "skills": []},
+			db, REF_FIRST)
+	_check(not r3.has("errors"), "set battle: the 3-piece magma run completes")
+	if r3.has("errors"):
+		return
+	var fire_seen := 0
+	var fire_ok := true
+	var p3_raw_ok := true
+	for e in r3["events"]:
+		if e["type"] == "on_attack" and e["attacker"] == "player":
+			fire_seen += 1
+			if String(e["element"]) != "fire":
+				fire_ok = false
+			var critf3 := 1.0
+			if bool(e["crit"]):
+				critf3 = 1.0 + CRIT_DAMAGE_BASE / 100.0
+			if int(e["raw_damage"]) != floori(24.0 * critf3):
+				p3_raw_ok = false
+	_check(fire_seen > 0 and fire_ok,
+			"set battle: every physical-native hit reports fire under the 3-piece convert (%d hits)"
+					% fire_seen)
+	_check(p3_raw_ok,
+			"set battle: the 3-piece convert blends to coef 1.0 (0.75 phys + 0.25 fire x1.0)")
+
+	# 回响 3 件：proc_on_kill 20% 回 4% 最大生命（真实试点数值）。60 个确定性种子
+	# （角色等级换种子）逐场切片到遭遇中段，边界血量必须高于「满血 − 承伤」才有
+	# 回血证据；全部种子无证据 = 概率上不可能（每种子至少两次 proc 判定）。
+	var em := {"base": "base_echo_mace", "rarity": "rare", "ilvl": 1,
+			"name": "回响晨星锤", "affixes": []}
+	var er := {"base": "base_echo_robe", "rarity": "rare", "ilvl": 1,
+			"name": "回响法袍", "affixes": []}
+	var ea := {"base": "base_echo_amulet", "rarity": "rare", "ilvl": 1,
+			"name": "回响护符", "affixes": []}
+	var echo_eq := {"weapon": em, "armor": er, "trinket": ea}
+	var ref3 := {"zone_id": "zone_graveyard_path", "encounter_index": 2}
+	var evidence := -1
+	var slices_ok := true
+	for lv in range(1, 61):
+		var r := SessionFacade.run_encounter({"player_level": lv,
+				"equipment": echo_eq, "skills": []}, db, ref3, 35)
+		if r.has("errors") or String(r.get("result", "")) != "in_progress":
+			slices_ok = false
+			break
+		var dmg := 0
+		for e in r["events"]:
+			if e["type"] == "on_attack" and e["attacker"] != "player":
+				dmg += int(e["raw_damage"])
+		var max_hp := (130.0 + 20.0 * float(lv - 1)) * 1.12
+		if float(r["resume"]["player_hp"]) > max_hp - float(dmg) + 0.0001:
+			evidence = lv
+			break
+	_check(slices_ok, "set battle: every echo seed slices mid-fight without errors")
+	_check(evidence > 0,
+			"set battle: the 20%% on-kill heal left HP evidence above max_hp - damage taken (seed level %d)"
+					% evidence)
+	if evidence > 0:
+		var rd := SessionFacade.run_encounter({"player_level": evidence,
+				"equipment": echo_eq, "skills": []}, db, ref3, 35)
+		_check(not rd.has("errors") and String(rd.get("result", "")) == "in_progress",
+				"set battle: the evidence seed replays in_progress")
+		if not rd.has("errors") and String(rd.get("result", "")) == "in_progress":
+			var rd2 := SessionFacade.run_encounter({"player_level": evidence,
+					"equipment": echo_eq, "skills": []}, db, ref3, 35)
+			_check(not rd2.has("errors")
+					and JSON.stringify(rd["events"]) == JSON.stringify(rd2["events"])
+					and float(rd["resume"]["player_hp"]) == float(rd2["resume"]["player_hp"]),
+					"set battle: the heal-evidence seed replays identically (deterministic)")
+
+	# 共用求值器的翻转证据：迷你双件套（100% 概率击杀回 100% 血，同 proc_on_kill
+	# 钩子）——1 件（无阶梯）必败、2 件（阶梯激活）必胜，结果随套装件数翻转。
+	var case_dir := tmp.path_join("set_feast")
+	_write_mini_db(case_dir, [_mini_monster("mob_feast_bag", {
+		"max_hp": 400.0, "attack_power": 15.0, "attack_speed": 1.0, "crit_chance": 0.0,
+	})], "mob_feast_bag", {
+		"items/base/base_mini_blade.json": _mini_blade(90.0),
+		"items/base/base_feast_plate.json": {"id": "base_feast_plate",
+				"name": "Feast Plate", "slot": "armor", "category": "plate"},
+		"sets/set_mini_feast.json": {"id": "set_mini_feast", "name": "Mini Feast",
+				"members": ["base_mini_blade", "base_feast_plate"],
+				"tiers": [{"pieces": 2, "effects": [{"type": "proc_on_kill",
+						"chance_percent": 100, "effect": "heal_percent_of_max_hp",
+						"amount_percent": 100}]}]},
+		"zones/zone_mini.json": _mini_zone("mob_feast_bag", "mob_feast_bag", 2),
+	})
+	var fdb := ContentDB.load_from_dir(case_dir)
+	_check(fdb.errors.is_empty(), "set battle: the feast mini db loads")
+	if fdb.errors.is_empty():
+		var blade := {"base": "base_mini_blade", "rarity": "rare", "ilvl": 1,
+				"name": "Mini Blade", "affixes": []}
+		var lone := SessionFacade.run_encounter({"player_level": 1,
+				"equipment": {"weapon": blade}, "skills": []}, fdb,
+				{"zone_id": "zone_mini", "encounter_index": 0})
+		_check(String(lone.get("result", "")) == "lose",
+				"set battle: one feast-set piece (no tier) loses the two-monster press")
+		var plate := {"base": "base_feast_plate", "rarity": "rare", "ilvl": 1,
+				"name": "Feast Plate", "affixes": []}
+		var pair := SessionFacade.run_encounter({"player_level": 1,
+				"equipment": {"weapon": blade, "armor": plate}, "skills": []}, fdb,
+				{"zone_id": "zone_mini", "encounter_index": 0})
+		_check(String(pair.get("result", "")) == "win",
+				"set battle: the 2-piece feast tier flips the fight to a win")
+		var f_kills: Array = (pair.get("events", []) as Array).filter(func(e):
+			return e["type"] == "on_kill")
+		_check(f_kills.size() == 2,
+				"set battle: the feast fight still kills both monsters")
+
+
+## AC5：换装改变套装件数 -> 即时重聚合，当前遭遇不中断（切片/续跑跨边界连续：
+## 怪血、相位、冷却、RNG 流原样携带）。迷你双件套 2 件档 = 攻击力 ×2：
+## AP (10+30) = 40 -> (10+30)x2 = 80，黄金推导见各断言（零暴击夹具）。
+func _run_set_ladder_reagg(tmp: String) -> void:
+	var case_dir := tmp.path_join("set_reagg")
+	_write_mini_db(case_dir, [], "mob_hp210", {
+		"monsters/mob_hp210.json": {"id": "mob_hp210", "name": "HP Bag",
+				"stats": {"max_hp": 210.0, "attack_power": 1.0, "attack_speed": 1.0,
+						"crit_chance": 0.0}},
+		"zones/zone_mini.json": {"id": "zone_mini", "name": "Mini", "level": 1,
+				"encounters": [{"monster": "mob_hp210", "count": 2}],
+				"boss": "mob_hp210", "order": 1},
+		"items/base/base_s_blade.json": {"id": "base_s_blade", "name": "Rage Blade",
+				"slot": "weapon", "category": "sword",
+				"implicit_mods": [{"attribute": "attack_power", "value": 30.0}]},
+		"items/base/base_s_plate.json": {"id": "base_s_plate", "name": "Rage Plate",
+				"slot": "armor", "category": "plate"},
+		"affixes/affix_mini_steady.json": {"id": "affix_mini_steady",
+				"name": "Mini Steady", "kind": "legendary",
+				"legendary": {"effects": [{"type": "stat_amp", "attribute": "crit_chance",
+						"operation": "add", "value": -5}]}},
+		"sets/set_mini_rage.json": {"id": "set_mini_rage", "name": "Mini Rage",
+				"members": ["base_s_blade", "base_s_plate"],
+				"tiers": [{"pieces": 2, "effects": [{"type": "stat_amp",
+						"attribute": "attack_power", "operation": "multiply",
+						"value": 2.0}]}]},
+	})
+	var mdb := ContentDB.load_from_dir(case_dir)
+	_check(mdb.errors.is_empty(), "reagg: the rage mini db loads")
+	if mdb.errors.is_empty():
+		var blade := {"base": "base_s_blade", "rarity": "rare", "ilvl": 1,
+				"name": "Rage Blade",
+				"affixes": [{"affix": "affix_mini_steady", "values": []}]}
+		var plate := {"base": "base_s_plate", "rarity": "rare", "ilvl": 1,
+				"name": "Rage Plate",
+				"affixes": [{"affix": "affix_mini_steady", "values": []}]}
+		var one_pc := {"player_level": 1, "equipment": {"weapon": blade}, "skills": []}
+		var two_pc := {"player_level": 1, "equipment": {"weapon": blade, "armor": plate},
+				"skills": []}
+		var inv_two := {"player_level": 1, "equipment": {"weapon": blade}, "skills": [],
+				"inventory": [plate]}
+		var ref := {"zone_id": "zone_mini", "encounter_index": 0}
+
+		# 1 件整场：AP 40 -> 每怪 6 刀，t110 收场（黄金推导，零暴击）。
+		var full1 := SessionFacade.run_encounter(one_pc, mdb, ref)
+		_check(not full1.has("errors") and String(full1.get("result", "")) == "win"
+				and int(full1.get("duration_ticks", -1)) == 110,
+				"reagg: the 1-piece fight ends at tick 110 (AP 40, two 210-HP bags)")
+		if full1.has("errors"):
+			return
+
+		# 切片（预算 80）+ 穿上第二件升档 + 续跑：边界前同流，边界后按 2 件档 80 重聚合。
+		var s1 := SessionFacade.run_encounter(one_pc, mdb, ref, 80)
+		_check(not s1.has("errors") and String(s1.get("result", "")) == "in_progress",
+				"reagg: the budgeted slice reports in_progress")
+		if s1.has("errors"):
+			return
+		if not s1.has("resume"):
+			_check(false, "reagg: the slice carries a handle")
+			return
+		var boundary: int = (s1["events"] as Array).size()
+		_check(JSON.stringify(s1["events"]) == JSON.stringify(
+				(full1["events"] as Array).slice(0, boundary)),
+				"reagg: the partial stream is an exact prefix of the uninterrupted one")
+		var up := SessionFacade.equip(inv_two, mdb, 0, "armor")
+		_check(not up.has("errors"), "reagg: the mid-fight equip succeeds")
+		if up.has("errors"):
+			return
+		var s2 := SessionFacade.run_encounter(up["state"], mdb, ref, -1, s1["resume"])
+		_check(not s2.has("errors"), "reagg: the upgraded resume runs without errors")
+		if s2.has("errors"):
+			return
+		_check(String(s2["result"]) == "win" and int(s2["duration_ticks"]) == 90,
+				"reagg: with the 2-piece tier the remainder ends at tick 90 (was 110)")
+		_check(_player_raws((s2["events"] as Array).slice(boundary)) == [80, 80],
+				"reagg: post-boundary hits use the amplified AP ((10+30) x 2 = 80)")
+		_check(JSON.stringify((s2["events"] as Array).slice(0, boundary))
+				== JSON.stringify(s1["events"]),
+				"reagg: the pre-boundary history is carried verbatim")
+
+		# 对照：同一切片不换装续跑 = 不打断的 1 件整场逐字一致（RNG 流连续）。
+		var s2b := SessionFacade.run_encounter(one_pc, mdb, ref, -1, s1["resume"])
+		_check(not s2b.has("errors") and JSON.stringify(s2b.get("events", []))
+				== JSON.stringify(full1["events"]),
+				"reagg: resuming without the swap replays the uninterrupted stream")
+
+		# 2 件整场：AP 80 -> t50 收场；切片（预算 20）+ 卸下武器（退回 1 件档）+ 续跑：
+		# 边界后立刻回落到裸攻 10，节奏与伤害同步回落。
+		var full2 := SessionFacade.run_encounter(two_pc, mdb, ref)
+		_check(not full2.has("errors") and String(full2.get("result", "")) == "win"
+				and int(full2.get("duration_ticks", -1)) == 50,
+				"reagg: the 2-piece fight ends at tick 50 (AP 80)")
+		if full2.has("errors"):
+			return
+		var d1 := SessionFacade.run_encounter(two_pc, mdb, ref, 20)
+		_check(not d1.has("errors") and String(d1.get("result", "")) == "in_progress",
+				"reagg: the 2-piece slice reports in_progress")
+		if d1.has("errors"):
+			return
+		if not d1.has("resume"):
+			_check(false, "reagg: the 2-piece slice carries a handle")
+			return
+		var down := SessionFacade.unequip(two_pc, "weapon")
+		_check(not down.has("errors"), "reagg: the mid-fight unequip succeeds")
+		if down.has("errors"):
+			return
+		var d2 := SessionFacade.run_encounter(down["state"], mdb, ref, -1, d1["resume"])
+		_check(not d2.has("errors"), "reagg: the downgraded resume runs without errors")
+		if d2.has("errors"):
+			return
+		_check(String(d2["result"]) == "win" and int(d2["duration_ticks"]) == 270,
+				"reagg: losing the tier drops the cadence back to AP 10 (ends at tick 270)")
+		var down_raws := _player_raws((d2["events"] as Array).slice(
+				(d1["events"] as Array).size()))
+		var all_ten := true
+		for raw in down_raws:
+			if int(raw) != 10:
+				all_ten = false
+		_check(down_raws.size() == 26 and all_ten,
+				"reagg: all %d post-boundary hits fall back to the bare AP 10"
+						% down_raws.size())
+
+		# 对照：2 件切片不卸装续跑 = 打断的 2 件整场逐字一致。
+		var d2b := SessionFacade.run_encounter(two_pc, mdb, ref, -1, d1["resume"])
+		_check(not d2b.has("errors") and JSON.stringify(d2b.get("events", []))
+				== JSON.stringify(full2["events"]),
+				"reagg: the 2-piece slice without the unequip replays the full stream")

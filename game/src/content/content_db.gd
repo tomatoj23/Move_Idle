@@ -264,6 +264,10 @@ func _assert_effects(effects: Array, path: String) -> bool:
 		match String(e.get("type", "")):
 			"stat_amp":
 				ok = _has_fields(e, path, ["attribute", "operation", "value"]) and ok
+				if ok and not ["add", "multiply"].has(String(e["operation"])):
+					errors.append("%s: stat_amp operation must be add|multiply, got '%s'"
+							% [path, String(e["operation"])])
+					ok = false
 			"proc_on_hit":
 				ok = _has_fields(e, path, ["chance_percent", "damage_type", "damage_percent"]) and ok
 				if ok and not DAMAGE_TYPES.has(String(e["damage_type"])):
@@ -366,9 +370,8 @@ func _assert_refs() -> void:
 			for mod in rec.get("mods", []):
 				_attr_ref(String(mod["attribute"]), "affix %s" % id)
 		else:
-			for e in rec.get("legendary", {}).get("effects", []):
-				if String(e.get("type", "")) == "stat_amp":
-					_attr_ref(String(e["attribute"]), "affix %s" % id)
+			_effect_attr_refs(rec.get("legendary", {}).get("effects", []),
+					"affix %s" % id)
 	for id in monster_modifiers:
 		for mod in monster_modifiers[id].get("mods", []):
 			_attr_ref(String(mod["attribute"]), "modifier %s" % id)
@@ -399,8 +402,18 @@ func _assert_refs() -> void:
 		for m in sets[id]["members"]:
 			if not item_bases.has(String(m)):
 				errors.append("set %s: dangling member ref '%s'" % [id, String(m)])
+		# 战斗语义前置（与传奇词缀 stat_amp 同规）：阶梯属性放大引用的属性必须存在。
+		for tier in sets[id]["tiers"]:
+			_effect_attr_refs(tier.get("effects", []), "set %s" % id)
 
 
 func _attr_ref(attr_id: String, where: String) -> void:
 	if not attributes.has(attr_id):
 		errors.append("%s: dangling attribute ref '%s'" % [where, attr_id])
+
+
+## 效果清单里的 stat_amp 属性引用存在性（战斗语义前置；传奇词缀与套装阶梯同规）。
+func _effect_attr_refs(effects: Array, where: String) -> void:
+	for e in effects:
+		if String(e.get("type", "")) == "stat_amp":
+			_attr_ref(String(e["attribute"]), where)
